@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 
 const GOOGLE_AUTHORIZATION = 'https://accounts.google.com/o/oauth2/v2/auth'

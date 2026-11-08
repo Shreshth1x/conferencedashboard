@@ -144,3 +144,33 @@ Deno.test('Owner Google sign-in verifies the email without requesting Gmail perm
     assert.deepEqual(await finishDeskGoogleAuth(config, pending, callback, 'login'), { email: mailboxA });
   });
 });
+
+Deno.test('Mailbox OAuth exchanges the code without a global Buffer', async () => {
+  await withGmailEnv(async () => {
+    const { url, pending } = beginDeskGoogleAuth(config, 'mailbox');
+    const scope = new URL(url).searchParams.get('scope');
+    globalThis.fetch = async (input, init) => {
+      const target = new URL(String(input));
+      if (target.hostname === 'oauth2.googleapis.com') {
+        const body = init?.body as URLSearchParams;
+        assert.equal(body.get('code'), 'test-code');
+        assert.equal(body.get('code_verifier'), pending.verifier);
+        return Response.json({ access_token: 'test-access', refresh_token: 'test-refresh', scope });
+      }
+      assert.equal(target.href, 'https://gmail.googleapis.com/gmail/v1/users/me/profile');
+      assert.equal(new Headers(init?.headers).get('Authorization'), 'Bearer test-access');
+      return Response.json({ emailAddress: mailboxB.toUpperCase() });
+    };
+    const globalBuffer = Object.getOwnPropertyDescriptor(globalThis, 'Buffer');
+    Object.defineProperty(globalThis, 'Buffer', { value: undefined, configurable: true });
+    try {
+      assert.deepEqual(
+        await finishDeskGoogleAuth(config, pending, { state: pending.state, code: 'test-code' }, 'mailbox'),
+        { email: mailboxB, refreshToken: 'test-refresh' },
+      );
+    } finally {
+      if (globalBuffer) Object.defineProperty(globalThis, 'Buffer', globalBuffer);
+      else Reflect.deleteProperty(globalThis, 'Buffer');
+    }
+  });
+});

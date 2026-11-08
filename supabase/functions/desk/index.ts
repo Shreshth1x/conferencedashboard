@@ -99,7 +99,9 @@ async function googleCallback(url: URL) {
       destination.searchParams.set("gmail", "connected");
     }
   } catch (error) {
-    const message = error instanceof DeskError || error instanceof GmailApiError ? error.message : "Google authorization expired or was canceled.";
+    const expected = error instanceof DeskError || error instanceof GmailApiError || error instanceof DeskStorageError;
+    if (!expected) console.error("Conference Desk Google callback failed", { mode: start.mode, kind: error instanceof Error ? error.name : typeof error });
+    const message = expected ? error.message : "Conference Desk could not finish Google authorization. Start again from Connections.";
     destination.searchParams.set(start.mode === "login" ? "desk_error" : "gmail", message);
   }
   return redirect(destination);
