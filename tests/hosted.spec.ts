@@ -34,11 +34,12 @@ test('owner session and multiple Gmail senders on a GitHub Pages base path', asy
     'access-control-allow-methods': 'GET,POST,OPTIONS',
     'access-control-allow-headers': 'authorization,content-type',
   };
-  const calls: { path: string; authorization?: string; body?: { returnUrl?: string; code?: string; email?: string } }[] = [];
+  const calls: { path: string; authorization?: string; body?: { returnUrl?: string; code?: string; email?: string; count?: number; now?: boolean; conferenceIds?: string[] } }[] = [];
+  const candidate = { id: 'contact-two', name: 'Jordan Lee', email: 'jordan@example.test', emailStatus: 'verified', attendance: 'attendee', bucket: 'direct', score: 85, reason: 'Role match' };
   let sender = first;
   let mailboxes = [first, second];
   const snapshot = () => ({
-    conferences: [{ id: 'one', title: 'Conference One', createdAt: future, contacts: [], sources: [], notes: [], needsRoster: false }],
+    conferences: [{ id: 'one', title: 'Conference One', createdAt: future, contacts: [candidate], sources: [], notes: [], needsRoster: false }],
     queue: [{
       id: 'queued', conferenceId: 'one', contactId: 'contact-one', account: first, email: 'lead@example.test',
       subject: 'Example outreach', body: 'Test', status: 'scheduled', scheduledAt: future,
@@ -63,6 +64,16 @@ test('owner session and multiple Gmail senders on a GitHub Pages base path', asy
       sender = body.email;
       return respond(snapshot());
     }
+    if (path === '/schedule/preview') return respond({
+      snapshot: snapshot(),
+      preview: {
+        token: 'mock-preview', account: body.email ?? sender, duplicateCount: 0,
+        rows: [{
+          conferenceId: 'one', conferenceTitle: 'Conference One', contactId: candidate.id, name: candidate.name,
+          email: candidate.email, bucket: candidate.bucket, subject: 'Conference outreach', body: 'Test', scheduledAt: future,
+        }],
+      },
+    });
     if (path === '/gmail/connect') return respond({ url: google(callback) });
     if (path === '/gmail/disconnect') {
       mailboxes = mailboxes.filter(email => email !== body.email);
@@ -104,6 +115,20 @@ test('owner session and multiple Gmail senders on a GitHub Pages base path', asy
   await expect(page.getByText('Connect sender mailbox', { exact: true })).toHaveCount(0);
   await page.getByLabel('Filter outreach by sender').selectOption(second);
   await expect(page.getByRole('heading', { name: 'No matching outreach' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Schedule next batch' }).click();
+  const schedule = page.getByRole('dialog');
+  const sendFrom = schedule.getByRole('combobox', { name: /Send from/ });
+  await expect(sendFrom).toHaveValue(second);
+  await sendFrom.selectOption(first);
+  await schedule.getByRole('button', { name: 'Preview batch' }).click();
+  await expect(schedule.getByRole('heading', { name: 'Review your batch' })).toBeVisible();
+  await expect(schedule.getByText(`1 email across 1 conference · From ${first}`, { exact: true })).toBeVisible();
+  expect(calls).toContainEqual({
+    path: '/schedule/preview', authorization: 'Bearer mock-session',
+    body: { count: 5, now: false, conferenceIds: ['one'], email: first },
+  });
+  await schedule.getByRole('button', { name: 'Close dialog' }).click();
 
   await page.goto(site + '#connections');
   await page.getByRole('button', { name: 'Connect another mailbox' }).click();

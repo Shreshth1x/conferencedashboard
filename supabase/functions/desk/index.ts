@@ -39,8 +39,7 @@ function requireSession(state: Pick<DeskState, "secrets">, key: string) {
   if ((hosted(state).sessions?.[key] ?? 0) <= Date.now()) throw new DeskError("Your session expired. Sign in again.", 401);
 }
 
-async function startGoogle(state: DeskState, mode: DeskGoogleMode, input: Record<string, unknown>, ownerSession?: string) {
-  const returnUrl = returnLocation(input.returnUrl);
+async function startGoogle(state: DeskState, mode: DeskGoogleMode, returnUrl: string, ownerSession?: string) {
   const { url, pending } = beginDeskGoogleAuth(googleConfig(), mode);
   const requests = hosted(state).oauth ??= {};
   expire(requests, request => request.pending.expiresAt <= Date.now());
@@ -166,13 +165,15 @@ async function handle(request: Request) {
     } catch { throw new DeskError("Invalid JSON request."); }
     if (name === "session/start") {
       if (origin !== allowedOrigin) throw new DeskError("Open Conference Desk from its published dashboard URL.", 403);
-      return json(await withDeskState(state => startGoogle(state, "login", input)));
+      const destination = returnLocation(input.returnUrl);
+      return json(await withDeskState(state => startGoogle(state, "login", destination)));
     }
     if (name === "session/exchange") {
       if (origin !== allowedOrigin) throw new DeskError("Open Conference Desk from its published dashboard URL.", 403);
       return json(await withDeskState(state => exchange(state, input)));
     }
     const key = await sessionKey(request);
+    const destination = name === "gmail/connect" ? returnLocation(input.returnUrl) : undefined;
     // Reject stale or invalid sessions before acquiring the workspace write lease.
     requireSession(await readDeskState(), key);
     return json(await withDeskState(async state => {
@@ -182,7 +183,7 @@ async function handle(request: Request) {
         await state.save();
         return { ok: true };
       }
-      if (name === "gmail/connect") return await startGoogle(state, "mailbox", input, key);
+      if (destination) return await startGoogle(state, "mailbox", destination, key);
       return await workspaceAction(state, path, input);
     }));
   } catch (error) {

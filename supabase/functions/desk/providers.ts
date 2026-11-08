@@ -241,7 +241,7 @@ export async function processResearch(state: DeskState) {
   try {
     if (job.kind === "discovery") {
       const result = await pollAutumnDiscovery(job.id, { key });
-      if (!result.done && result.state !== "input-required") return false;
+      if (!result.done && result.state !== "input-required") return processApollo(state);
       if (result.done) {
         mergeContacts(state.workspace, event, result.contacts);
         for (const person of result.contacts) if (person.sourceUrl && !event.sources.some(source => source.url === person.sourceUrl)) {
@@ -253,7 +253,7 @@ export async function processResearch(state: DeskState) {
     } else {
       const people = event.contacts.filter(person => job.contactIds?.includes(person.id));
       const result = await pollAutumnEnrichment(job.id, people, { key });
-      if (!result.done && result.state !== "input-required") return false;
+      if (!result.done && result.state !== "input-required") return processApollo(state);
       if (result.done) applyEnrichment(state, event, result.contacts);
       job.message = result.message;
       job.status = result.state === "input-required" ? "needs_input" : /fail|cancel/i.test(result.state) ? "failed" : "done";
@@ -261,6 +261,6 @@ export async function processResearch(state: DeskState) {
     await state.save();
     return true;
   } catch {
-    return false;
+    return processApollo(state);
   }
 }
