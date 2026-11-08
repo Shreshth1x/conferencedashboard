@@ -58,7 +58,10 @@ test('Gmail OAuth requires state, PKCE, both scopes and a refresh token', async 
 test('Gmail only sends the approved single-recipient draft content', async (t) => {
   let raw = ''
   let attempted = false
-  const beforeSend = () => { attempted = true }
+  const beforeSend = async () => {
+    await new Promise<void>(resolve => setImmediate(resolve))
+    attempted = true
+  }
   const mock = t.mock.method(globalThis, 'fetch', async (input: string, init: RequestInit) => {
     const url = new URL(input)
     const resource = url.pathname.split('/').at(-1)
