@@ -3,12 +3,12 @@ import { outreachContactKeys, outreachEmailKey } from './outreach-identity';
 
 type OutreachReference = {
   conferenceId: string;
-  contactId: string;
+  contactId?: string;
   title: string;
-  kind: 'sent' | 'scheduled' | 'held' | 'gmail-draft' | 'prior';
+  kind: 'sent' | 'scheduled' | 'gmail-scheduled' | 'held' | 'gmail-draft' | 'prior';
 };
 
-const priority: Record<OutreachReference['kind'], number> = { sent: 0, scheduled: 1, held: 2, 'gmail-draft': 3, prior: 4 };
+const priority: Record<OutreachReference['kind'], number> = { sent: 0, 'gmail-scheduled': 1, scheduled: 2, held: 3, 'gmail-draft': 4, prior: 5 };
 
 export function outreachReferences(snapshot: Pick<Snapshot, 'conferences' | 'queue' | 'connections'>): Map<string, OutreachReference> {
   const references = new Map<string, OutreachReference>();
@@ -41,6 +41,13 @@ export function outreachReferences(snapshot: Pick<Snapshot, 'conferences' | 'que
       else if (mailbox && person.draft?.gmailId && outreachEmailKey(person.draft.gmailAccount) === mailbox) {
         add([...keys, outreachEmailKey(person.draft.gmailExportedEmail)], { ...reference, kind: 'gmail-draft' }, person.draft.gmailExportedAt);
       }
+    }
+    for (const item of event.gmailScheduled ?? []) {
+      const email = outreachEmailKey(item.email);
+      const person = item.contactId ? contactsByEvent.get(event.id)?.get(item.contactId) :
+        event.contacts.find(candidate => outreachEmailKey(candidate.email) === email);
+      add([email, ...(person ? outreachContactKeys(person) : [])],
+        { conferenceId: event.id, contactId: person?.id, title, kind: 'gmail-scheduled' }, item.observedAt);
     }
   }
 

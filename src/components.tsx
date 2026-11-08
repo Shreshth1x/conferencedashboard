@@ -98,7 +98,7 @@ export function ConferenceCard({ event, queue, onOpen }: { event: Conference; qu
       <span><strong>{stats.sent}</strong> Sent</span>
       <span><strong>{stats.replies}</strong> Replies</span>
       <span><strong>{stats.left}</strong> Left</span>
-      {stats.scheduled > 0 && <span className="scheduled-chip"><Clock3 size={12}/>{stats.scheduled} queued</span>}
+      {stats.scheduled > 0 && <span className="scheduled-chip"><Clock3 size={12}/>{stats.scheduled} scheduled</span>}
     </div>
   </button>;
 }

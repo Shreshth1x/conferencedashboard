@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Conference, Contact, QueueItem } from '../src/model';
-import { localDate } from '../src/model';
+import { campaignCounts, localDate, scheduledCount } from '../src/model';
 import { outreachContactKeys, outreachDraftOwners, outreachEmailKey, outreachReservations, planOutreach } from './outreach-planner';
 import { SCHEDULE_GAP_MS } from './schedule';
 
@@ -115,4 +115,33 @@ test('uses the original and current address of a Gmail draft to reserve the exis
   const result = planOutreach({ conferences: [a, b], queue: [], account, now, count: 5 });
   assert.deepEqual(result.rows.map(row => row.contact.id), ['owner']);
   assert.equal(result.duplicateCount, 2);
+});
+
+test('counts Gmail schedules separately and reserves recipients across conferences', () => {
+  const gmailTime = '2026-11-07T15:10:00Z';
+  const a = event('a', '2026-11-10', [
+    person('native', 99, { linkedin: 'https://linkedin.com/in/shared-contact' }),
+    person('desk', 98), person('organizer', 90), person('ready', 80),
+  ]);
+  a.gmailScheduled = [
+    { account, email: 'native@example.org', contactId: 'native', gmailMessageId: 'native-one', scheduledAt: gmailTime },
+    { account, email: 'native@example.org', contactId: 'native', gmailMessageId: 'native-two' },
+    { account, email: 'organizer@example.org', contactId: 'organizer', gmailMessageId: 'logistics', purpose: 'organizer' },
+  ];
+  const b = event('b', '2026-11-12', [
+    person('alias', 99, { linkedin: 'https://www.linkedin.com/in/shared-contact/' }),
+  ]);
+  const overlap = queued(a.id, 'native', gmailTime, { account: account.toUpperCase() });
+  const queue = [overlap, queued(a.id, 'desk', gmailTime)];
+  const stats = campaignCounts(a, queue, +now);
+  assert.equal(stats.scheduled, 4);
+  assert.equal(stats.left, 2);
+  assert.equal(stats.sent, 0);
+  assert.equal(scheduledCount([a, b], queue, Date.parse(gmailTime)), 3);
+  assert.ok(outreachReservations([a, b], queue, overlap.id).has('native@example.org'));
+  assert.deepEqual(planOutreach({ conferences: [a, b], queue, account, now, count: 5 }).rows.map(row => row.contact.id), ['ready']);
+  const gmailSlot = planOutreach({ conferences: [a], queue: [], account, now, count: 1 }).rows[0].scheduledAt;
+  const otherMailboxSlot = planOutreach({ conferences: [a], queue: [], account: 'other@example.org', now, count: 1 }).rows[0].scheduledAt;
+  assert.equal(Date.parse(gmailSlot), Date.parse(gmailTime) + SCHEDULE_GAP_MS);
+  assert.equal(Date.parse(otherMailboxSlot), Date.parse(gmailTime));
 });

@@ -38,6 +38,8 @@ Direct fits go first, then potential introducers. Within each fit group, the pla
 
 The hosted queue runs through Supabase. When using the local dashboard, keep the server running and the Mac awake through scheduled sends. A send more than 15 minutes past its slot is held for review. The worker checks for prior Gmail outreach, reconciles known sends, and holds ambiguous attempts. **Sync Gmail** checks tracked threads for direct replies. In **Send queue**, use **Pending & held**, **Sent**, and **Replies** to find the conference, sender, recipient, actual timestamp, and Gmail conversation. Cancel a pending send there to free its slot and recipient for a future batch.
 
+Known Gmail schedules also appear under **Pending & held** and count on their conference cards. Conference Desk reserves their recipients and any known times for the sending inbox. Open **Gmail Scheduled** to change one of these messages in Gmail. Connected inboxes refresh through **Sync Gmail** and the cloud worker.
+
 ## Connections
 
 - **Gmail.** Enable Gmail API in Google Cloud and create a Web application OAuth client. Copy `.env.example` to `.env`, set the client ID and client secret, and register the exact local redirect URI from Connections. Restart and click **Connect Gmail**. Add your mailbox as a test user if the OAuth app is in Testing. Testing-mode authorization for Gmail expires after seven days. [Google's setup guide](https://developers.google.com/workspace/gmail/api/auth/web-server)

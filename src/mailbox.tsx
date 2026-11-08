@@ -1,7 +1,11 @@
 import { useMemo, useState } from 'react';
 import { ArrowUpRight, CalendarClock, Clock3, Mail, MessageSquare, Search, Send, TriangleAlert, X } from 'lucide-react';
 import { Empty, slotTime } from './components';
-import { gmailThreadUrl, TIME_ZONE, type Contact, type QueueItem, type Snapshot } from './model';
+import {
+  gmailScheduledMessageKey, gmailScheduledUrl, gmailThreadUrl, isGmailSchedulePending, scheduledRecipientKey,
+  TIME_ZONE, type Contact, type QueueItem, type Snapshot,
+} from './model';
+import { outreachEmailKey } from './outreach-identity';
 import './mailbox.css';
 
 type View = 'pending' | 'sent' | 'replies' | 'cancelled';
@@ -10,7 +14,7 @@ type Entry = {
   key: string;
   conferenceId: string;
   conference: string;
-  contactId: string;
+  contactId?: string;
   name: string;
   email?: string;
   account?: string;
@@ -22,6 +26,9 @@ type Entry = {
   threadAccount?: string;
   replyCount?: number;
   queueItem?: QueueItem;
+  gmailScheduled?: 'pending' | 'check';
+  gmailOverlap?: boolean;
+  organizer?: boolean;
 };
 
 const dayFormatter = new Intl.DateTimeFormat('en-US', {
@@ -45,10 +52,26 @@ function makeEntries(snapshot: Snapshot) {
   const sentQueue = new Map<string, QueueItem>();
   const history = new Map<string, Entry>();
   const replies = new Map<string, Entry>();
+  const gmailMessages = new Set<string>();
+  const gmailRecipients = new Set<string>();
   const output: Record<View, Entry[]> = { pending: [], sent: [], replies: [], cancelled: [] };
 
   for (const event of snapshot.conferences) {
     for (const person of event.contacts) contacts.set(contactKey(event.id, person.id), person);
+    for (const row of event.gmailScheduled ?? []) {
+      gmailRecipients.add(scheduledRecipientKey(row.account, row.email));
+      const key = gmailScheduledMessageKey(row);
+      if (gmailMessages.has(key)) continue;
+      gmailMessages.add(key);
+      const person = row.contactId ? contacts.get(contactKey(event.id, row.contactId)) :
+        event.contacts.find(candidate => outreachEmailKey(candidate.email) === outreachEmailKey(row.email));
+      output.pending.push({
+        key: `gmail-scheduled:${key}`, conferenceId: event.id, conference: event.shortTitle || event.title,
+        contactId: person?.id, name: person?.name || row.email, email: row.email, account: row.account,
+        subject: row.subject, date: row.scheduledAt, status: 'scheduled',
+        gmailScheduled: isGmailSchedulePending(row) ? 'pending' : 'check', organizer: row.purpose === 'organizer',
+      });
+    }
   }
 
   for (const item of snapshot.queue) {
@@ -65,6 +88,7 @@ function makeEntries(snapshot: Snapshot) {
       key: item.id, conferenceId: item.conferenceId, conference: event?.shortTitle || event?.title || 'Conference',
       contactId: item.contactId, name: person?.name || item.email, email: item.email, account: item.account,
       subject: item.subject, date: item.scheduledAt, status: item.status, queueItem: item,
+      gmailOverlap: (item.status === 'scheduled' || item.status === 'sending') && gmailRecipients.has(scheduledRecipientKey(item.account, item.email)),
       threadId: item.status === 'failed' ? person?.priorOutreach?.gmailThreadId : undefined,
       threadAccount: item.status === 'failed' ? person?.priorOutreach?.account : undefined,
     });
@@ -124,7 +148,7 @@ function groupEntries(entries: Entry[]) {
   const groups = new Map<string, Entry[]>();
   for (const entry of entries) {
     const date = sortTime(entry.date);
-    const title = entry.status === 'failed' ? 'Needs review' : date ? dayFormatter.format(date) : 'Date unavailable';
+    const title = entry.status === 'failed' ? 'Needs review' : entry.gmailScheduled === 'check' ? 'Check in Gmail' : date ? dayFormatter.format(date) : 'Date unavailable';
     const group = groups.get(title);
     if (group) group.push(entry);
     else groups.set(title, [entry]);
@@ -152,24 +176,30 @@ function MailboxRow({ entry, view, mailboxes, busy, onCancel, navigate, onOpenCo
   mailboxes: Set<string>;
 } & Pick<MailboxProps, 'busy' | 'onCancel' | 'navigate' | 'onOpenContact'>) {
   const item = entry.queueItem;
-  const link = gmailThreadUrl(entry.threadAccount || entry.account, entry.threadId);
+  const link = entry.gmailScheduled && entry.account ? gmailScheduledUrl(entry.account) : gmailThreadUrl(entry.threadAccount || entry.account, entry.threadId);
+  const contactId = entry.contactId;
   const Icon = entry.status === 'failed' ? TriangleAlert : entry.status === 'replied' ? MessageSquare : entry.status === 'sent' ? Send : Clock3;
-  const paused = view === 'pending' && entry.status === 'scheduled' && entry.account && !mailboxes.has(entry.account.toLowerCase());
-  const status = paused ? 'Connect sender mailbox' : entry.status === 'replied' && (entry.replyCount ?? 0) > 1 ? `${entry.replyCount} replies` : displayStatus[entry.status];
+  const paused = view === 'pending' && item?.status === 'scheduled' && entry.account && !mailboxes.has(entry.account.toLowerCase());
+  const needsReview = paused || entry.gmailOverlap || entry.gmailScheduled === 'check';
+  let status = displayStatus[entry.status];
+  if (entry.gmailScheduled) status = entry.gmailScheduled === 'pending' ? 'Scheduled in Gmail' : 'Check in Gmail';
+  else if (entry.gmailOverlap) status = 'Also scheduled in Gmail';
+  else if (paused) status = 'Connect sender mailbox';
+  else if (entry.status === 'replied' && (entry.replyCount ?? 0) > 1) status = `${entry.replyCount} replies`;
   return <li className="mailbox-row">
     <div className="mailbox-contact">
       <span className={`mailbox-mark ${entry.status}`}><Icon size={16} aria-hidden="true"/></span>
       <div className="mailbox-person">
-        {onOpenContact ? <button className="mailbox-person-link" onClick={() => onOpenContact(entry.conferenceId, entry.contactId)}>{entry.name}</button> : <strong>{entry.name}</strong>}
+        {onOpenContact && contactId ? <button className="mailbox-person-link" onClick={() => onOpenContact(entry.conferenceId, contactId)}>{entry.name}</button> : <strong>{entry.name}</strong>}
         <div className="mailbox-address"><span>To</span> {entry.email || 'Address unavailable'}</div>
-        {entry.subject && <div className="mailbox-subject">{entry.subject}</div>}
+        {entry.subject && <div className="mailbox-subject">{entry.organizer ? 'Organizer · ' : ''}{entry.subject}</div>}
         {item?.error && entry.status === 'failed' && <div className="mailbox-error">{item.error}</div>}
       </div>
     </div>
     <button className="mailbox-event" onClick={() => navigate('event/' + entry.conferenceId)}>{entry.conference}</button>
     <div className="mailbox-address mailbox-sender"><span>From</span> {entry.account || 'Sender unavailable'}</div>
     <div className="mailbox-timing">
-      <span className={`mailbox-status ${paused ? 'failed' : entry.status}`}><span className="dot"/>{status}</span>
+      <span className={`mailbox-status ${needsReview ? 'failed' : entry.status}`}><span className="dot"/>{status}</span>
       <time dateTime={entry.date} title={entryTime(entry.date)}>{view === 'sent' && entry.status === 'replied' ? 'Sent ' : view === 'cancelled' ? 'Slot was ' : ''}
         {entry.status === 'failed' || !sortTime(entry.date) ? entryTime(entry.date) : timeFormatter.format(sortTime(entry.date))}
       </time>
@@ -178,7 +208,10 @@ function MailboxRow({ entry, view, mailboxes, busy, onCancel, navigate, onOpenCo
     <div className="mailbox-row-action">
       {entry.status === 'scheduled' && item && <button className="button secondary" disabled={busy} onClick={() => onCancel(item.id)} aria-label={`Cancel send to ${entry.name}`}>Cancel</button>}
       {entry.status === 'failed' && item && !item.sendingAt && <button className="button secondary" disabled={busy} onClick={() => onCancel(item.id, true)}>Release hold</button>}
-      {link && <a className="button secondary" href={link} target="_blank" rel="noreferrer" aria-label={`Open Gmail thread with ${entry.name}`}>Thread <ArrowUpRight size={13}/></a>}
+      {link && <a className="button secondary" href={link} target="_blank" rel="noreferrer"
+        aria-label={entry.gmailScheduled ? `Open Gmail Scheduled for ${entry.account}` : `Open Gmail thread with ${entry.name}`}>
+        {entry.gmailScheduled ? 'Gmail Scheduled' : 'Thread'} <ArrowUpRight size={13}/>
+      </a>}
     </div>
   </li>;
 }
@@ -200,7 +233,8 @@ export function MailboxView({ snapshot, navigate, onCancel, onSync, busy, onSche
   const connected = snapshot.connections.mailboxes ?? (mailbox ? [mailbox] : []);
   const mailboxes = new Set(connected.map(email => email.toLowerCase()));
   const senderOptions = [...new Set([...connected, ...Object.values(entries).flatMap(items => items.flatMap(item => item.account ? [item.account] : []))].map(email => email.toLowerCase()))].sort();
-  const next = entries.pending.find(entry => entry.status === 'scheduled' && entry.account && mailboxes.has(entry.account.toLowerCase()));
+  const next = entries.pending.find(entry => entry.queueItem?.status === 'scheduled' && !entry.gmailOverlap && entry.account && mailboxes.has(entry.account.toLowerCase()));
+  const pendingCount = entries.pending.filter(entry => !entry.gmailOverlap).length;
   const views: { key: View; name: string }[] = [{ key: 'pending', name: 'Pending & held' }, { key: 'sent', name: 'Sent' }, { key: 'replies', name: 'Replies' }];
   if (entries.cancelled.length) views.push({ key: 'cancelled', name: 'Cancelled' });
   const eventOptions = [...snapshot.conferences].sort((a, b) => (a.shortTitle || a.title).localeCompare(b.shortTitle || b.title));
@@ -220,7 +254,7 @@ export function MailboxView({ snapshot, navigate, onCancel, onSync, busy, onSche
     <div className="list-toolbar mailbox-toolbar">
       <div className="segments" aria-label="Outreach status">
         {views.map(({ key, name }) => <button key={key} aria-pressed={view === key} className={view === key ? 'chosen' : ''} onClick={() => { setView(key); setLimit(pageSize); }}>
-          {name} <small>{entries[key].length}</small>
+          {name} <small>{key === 'pending' ? pendingCount : entries[key].length}</small>
         </button>)}
       </div>
       <div className="mailbox-filters">

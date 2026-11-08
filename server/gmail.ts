@@ -383,6 +383,59 @@ function directRecipient(message: GmailMessage): string {
   return headers.length === 1 ? mailbox(headers[0].value) : ''
 }
 
+export async function listGmailScheduled(token: string): Promise<{ ids: string[]; complete: boolean }> {
+  const query = new URLSearchParams({ q: 'in:scheduled', maxResults: '100' })
+  const page = await gmail<{ messages?: Array<{ id: string }>; nextPageToken?: string; resultSizeEstimate?: number }>(token, `/messages?${query}`)
+  if (!page || (!Array.isArray(page.messages) && (page.messages !== undefined || page.resultSizeEstimate !== 0))
+    || page.messages?.some(message => !message || !/^[\w-]+$/.test(message.id || ''))) {
+    throw new GmailApiError(502, 'Gmail returned an unreadable Scheduled list.')
+  }
+  return { ids: [...new Set((page.messages ?? []).map(message => message.id))], complete: !page.nextPageToken }
+}
+
+export interface GmailScheduledMetadata {
+  id: string
+  threadId?: string
+  email?: string
+  sender?: string
+  subject?: string
+  rfcMessageId?: string
+  sentAt?: string
+  sent: boolean
+  draftOrTrash: boolean
+}
+
+export async function getGmailScheduledMetadata(token: string, id: string): Promise<GmailScheduledMetadata | null> {
+  const query = new URLSearchParams({ format: 'metadata' })
+  for (const name of ['From', 'To', 'Subject', 'Message-ID']) query.append('metadataHeaders', name)
+  let message: GmailMessage
+  try {
+    message = await gmail<GmailMessage>(token, `/messages/${encodeURIComponent(id)}?${query}`)
+  } catch (error) {
+    if (error instanceof GmailApiError && error.status === 404) return null
+    throw error
+  }
+  if (message?.id !== id || (message.labelIds !== undefined && !Array.isArray(message.labelIds))) {
+    throw new GmailApiError(502, 'Gmail returned unreadable Scheduled message metadata.')
+  }
+  const email = directRecipient(message)
+  const sender = mailbox(header(message, 'from'))
+  const rfcMessageId = header(message, 'message-id').replace(/^<|>$/g, '')
+  const sent = Boolean(message.labelIds?.includes('SENT') && !message.labelIds?.includes('DRAFT'))
+  const sentTime = sent ? gmailTime(message.internalDate) : undefined
+  return {
+    id,
+    threadId: message.threadId || undefined,
+    email: validMailbox(email) ? email : undefined,
+    sender: validMailbox(sender) ? sender : undefined,
+    subject: decodeSubject(header(message, 'subject')) || undefined,
+    rfcMessageId: /^[a-z\d._+-]+@[a-z\d.-]+$/i.test(rfcMessageId) ? rfcMessageId : undefined,
+    sentAt: sentTime === undefined ? undefined : new Date(sentTime).toISOString(),
+    sent,
+    draftOrTrash: Boolean(message.labelIds?.some(label => label === 'DRAFT' || label === 'TRASH')),
+  }
+}
+
 export interface PriorGmailOutreach extends GmailMessage {
   recipient: string
   sentAt?: string

@@ -1,6 +1,6 @@
 import type { BatchPreview, Conference, Contact, ICP, McpConnection, Provider, QueueItem, Snapshot, Workspace } from "../../../src/model.ts";
 import { isPast, localDate, rankContacts, safeLink, target } from "../../../src/model.ts";
-import { canReachContact, isOutreachOpen, outreachContactKeys, outreachDraftOwners, outreachReservations, planOutreach } from "../../../server/outreach-planner.ts";
+import { canReachContact, gmailScheduleTimes, isOutreachOpen, outreachContactKeys, outreachDraftOwners, outreachReservations, planOutreach } from "../../../server/outreach-planner.ts";
 import { SCHEDULE_GAP_MS } from "../../../server/schedule.ts";
 import { writeDraft } from "../../../server/outbound-writer.ts";
 import { parseAttendeeList, scoreContact, type ResearchContact, type ResearchResult } from "../../../server/conference-research.ts";
@@ -149,8 +149,11 @@ async function confirmBatch(state: DeskState, id: string, conferenceId?: string)
   }
   const { email: account } = getDeskMailbox(state, saved.preview.account);
   const now = new Date();
-  const occupied = workspace.queue.filter(item => item.account === account).flatMap(item =>
-    [active(item) ? Date.parse(item.scheduledAt) : NaN, item.sendingAt ? Date.parse(item.sendingAt) : NaN].filter(Number.isFinite));
+  const occupied = [
+    ...gmailScheduleTimes(workspace.conferences, account).map(Date.parse),
+    ...workspace.queue.filter(item => item.account === account).flatMap(item =>
+      [active(item) ? Date.parse(item.scheduledAt) : NaN, item.sendingAt ? Date.parse(item.sendingAt) : NaN].filter(Number.isFinite)),
+  ];
   const additions: QueueItem[] = [];
   const owners = outreachDraftOwners(workspace.conferences, account);
   for (const row of saved.preview.rows) {

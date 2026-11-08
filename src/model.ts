@@ -59,6 +59,18 @@ export interface Contact {
   priorOutreach?: PriorOutreach;
 }
 
+export interface GmailScheduledMessage {
+  account: string;
+  email: string;
+  gmailMessageId: string;
+  gmailThreadId?: string;
+  subject?: string;
+  scheduledAt?: string;
+  contactId?: string;
+  observedAt?: string;
+  purpose?: 'prospect' | 'organizer';
+}
+
 export interface Conference {
   id: string;
   title: string;
@@ -73,6 +85,7 @@ export interface Conference {
   notes: string[];
   needsRoster: boolean;
   example?: boolean;
+  gmailScheduled?: GmailScheduledMessage[];
 }
 
 export interface ICP {
@@ -222,13 +235,42 @@ export function rankContacts(contacts: Contact[]) {
 
 export function target(contact: Contact) { return contact.bucket !== 'irrelevant'; }
 
-export function campaignCounts(conference: Conference, queue: QueueItem[]) {
+function normalizedAddress(email: string) { return email.trim().toLowerCase(); }
+
+export function scheduledRecipientKey(account: string, email: string) {
+  return JSON.stringify([normalizedAddress(account), normalizedAddress(email)]);
+}
+
+export function gmailScheduledMessageKey(message: GmailScheduledMessage) {
+  return JSON.stringify([normalizedAddress(message.account), message.gmailMessageId]);
+}
+
+export function isGmailSchedulePending(message: GmailScheduledMessage, now = Date.now()) {
+  const sendTime = Date.parse(message.scheduledAt || '');
+  return !Number.isFinite(sendTime) || sendTime > now;
+}
+
+export function scheduledCount(conferences: readonly Conference[], queue: readonly QueueItem[], now = Date.now()) {
+  const gmail = conferences.flatMap(event => event.gmailScheduled ?? []);
+  const gmailRecipients = new Set(gmail.map(row => scheduledRecipientKey(row.account, row.email)));
+  const gmailPending = new Set(gmail.filter(row => isGmailSchedulePending(row, now)).map(gmailScheduledMessageKey));
+  return gmailPending.size + queue.filter(item => (item.status === 'scheduled' || item.status === 'sending') &&
+    !gmailRecipients.has(scheduledRecipientKey(item.account, item.email))).length;
+}
+
+export function campaignCounts(conference: Conference, queue: QueueItem[], now = Date.now()) {
   const contacts = conference.contacts;
   const actionable = contacts.filter(contact => target(contact) && (!contact.previouslyContacted || contact.sentAt));
   const sent = contacts.filter(contact => contact.sentAt).length;
   const replies = contacts.filter(contact => contact.repliedAt).length;
-  const scheduled = queue.filter(item => item.conferenceId === conference.id && (item.status === 'scheduled' || item.status === 'sending')).length;
-  const left = actionable.filter(contact => !contact.sentAt && !contact.previouslyContacted).length;
+  const eventQueue = queue.filter(item => item.conferenceId === conference.id);
+  const scheduled = scheduledCount([conference], eventQueue, now);
+  const pending = eventQueue.filter(item => item.status === 'scheduled' || item.status === 'sending');
+  const gmailProspects = (conference.gmailScheduled ?? []).filter(row => row.purpose !== 'organizer');
+  const scheduledContacts = new Set([...pending, ...gmailProspects].map(row => row.contactId));
+  const scheduledAddresses = new Set([...pending, ...gmailProspects].map(row => normalizedAddress(row.email)));
+  const left = actionable.filter(contact => !contact.sentAt && !contact.previouslyContacted &&
+    !scheduledContacts.has(contact.id) && (!contact.email || !scheduledAddresses.has(normalizedAddress(contact.email)))).length;
   const sentToTargets = actionable.filter(contact => contact.sentAt).length;
   const progress = actionable.length ? Math.round(100 * sentToTargets / actionable.length) : 0;
   const replyRate = sent ? Math.round(100 * replies / sent) : 0;
@@ -237,6 +279,10 @@ export function campaignCounts(conference: Conference, queue: QueueItem[]) {
 
 export function gmailDraftsUrl(email?: string) {
   return email ? `https://mail.google.com/mail/u/${encodeURIComponent(email)}/#drafts` : 'https://mail.google.com/mail/u/0/#drafts';
+}
+
+export function gmailScheduledUrl(email: string) {
+  return `https://mail.google.com/mail/u/${encodeURIComponent(email)}/#scheduled`;
 }
 
 export function gmailThreadUrl(account?: string, threadId?: string) {

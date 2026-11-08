@@ -53,6 +53,10 @@ export function outreachReservations(conferences: readonly Conference[], queue: 
     for (const person of event.contacts) {
       if (person.sentAt || person.repliedAt || person.previouslyContacted) block([...outreachContactKeys(person), outreachEmailKey(person.sentEmail), outreachEmailKey(person.priorOutreach?.email)]);
     }
+    for (const item of event.gmailScheduled ?? []) {
+      const person = item.contactId ? identities.contacts.get(event.id)?.get(item.contactId) : undefined;
+      block([outreachEmailKey(item.email), ...(person ? outreachContactKeys(person) : [])]);
+    }
   }
   for (const item of queue) {
     if (item.id === ignoreQueueId || item.status === 'cancelled') continue;
@@ -101,6 +105,13 @@ export function outreachDraftOwners(conferences: readonly Conference[], account:
 
 function isActive(item: QueueItem) { return item.status === 'scheduled' || item.status === 'sending'; }
 
+export function gmailScheduleTimes(conferences: readonly Conference[], account: string): string[] {
+  const mailbox = outreachEmailKey(account);
+  if (!mailbox) return [];
+  return conferences.flatMap(event => (event.gmailScheduled ?? []).flatMap(item =>
+    outreachEmailKey(item.account) === mailbox && item.scheduledAt && Number.isFinite(Date.parse(item.scheduledAt)) ? [item.scheduledAt] : []));
+}
+
 export function planOutreach({ conferences, queue, selectedConferenceIds, account, count, now = new Date(), sendNow = false }: OutreachPlanInput) {
   const selected = selectedConferenceIds && new Set(selectedConferenceIds);
   const identities = buildIdentities(conferences);
@@ -108,7 +119,8 @@ export function planOutreach({ conferences, queue, selectedConferenceIds, accoun
   const owners = outreachDraftOwners(conferences, account);
   const sameMailbox = queue.filter(item => outreachEmailKey(item.account) === outreachEmailKey(account));
   const active = sameMailbox.filter(isActive).sort((a, b) => Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt));
-  const occupied = [...active.map(item => item.scheduledAt), ...sameMailbox.flatMap(item => item.sendingAt ? [item.sendingAt] : [])];
+  const occupied = [...active.map(item => item.scheduledAt), ...sameMailbox.flatMap(item => item.sendingAt ? [item.sendingAt] : []),
+    ...gmailScheduleTimes(conferences, account)];
   const eligibleEvents = conferences.filter(event => (!selected || selected.has(event.id)) && isOutreachOpen(event, now));
   const ranked = eligibleEvents.flatMap(event => event.contacts.filter(canReachContact)
     .map(contact => ({ event, contact, identity: identities.find(outreachEmailKey(contact.email)) }))).sort(compareCandidate);

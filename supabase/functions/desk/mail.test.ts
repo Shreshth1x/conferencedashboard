@@ -5,6 +5,7 @@ import { gmailMessageId } from '../../../server/gmail.ts';
 import type { QueueItem, Workspace } from '../../../src/model.ts';
 import { beginDeskGoogleAuth, finishDeskGoogleAuth, processDueMail, syncDeskMailbox } from './mail.ts';
 import type { DeskState } from './storage.ts';
+import { workspaceAction } from './workspace.ts';
 
 const config = { clientId: 'test-client', clientSecret: 'test-secret', redirectUri: 'https://project.example/functions/v1/desk/gmail/callback' };
 const mailboxA = 'first@example.com';
@@ -172,5 +173,96 @@ Deno.test('Mailbox OAuth exchanges the code without a global Buffer', async () =
       if (globalBuffer) Object.defineProperty(globalThis, 'Buffer', globalBuffer);
       else Reflect.deleteProperty(globalThis, 'Buffer');
     }
+  });
+});
+
+Deno.test('Native Scheduled sync preserves uncertain rows and attributes proven sends to the linked contact', async () => {
+  await withGmailEnv(async () => {
+    const { state, queue, persisted } = fixture('native', [mailboxA, mailboxA, mailboxA]);
+    const event = state.workspace.conferences[0];
+    const [prospect, followup, organizer] = event.contacts;
+    const oldSentAt = new Date(Date.now() - 86_400_000).toISOString();
+    Object.assign(followup, { sentAt: oldSentAt, gmailAccount: mailboxB, gmailMessageId: 'old-send' });
+    queue.length = 0;
+    const explicitAlias = 'alternate@example.org';
+    event.gmailScheduled = [
+      { account: mailboxA, gmailMessageId: 'still-scheduled', email: 'another@example.org' },
+      { account: mailboxA, gmailMessageId: 'native-sent', email: explicitAlias, contactId: prospect.id },
+      { account: mailboxA, gmailMessageId: 'native-followup', email: followup.email!, contactId: followup.id },
+      { account: mailboxA, gmailMessageId: 'native-organizer', email: organizer.email!, contactId: organizer.id, purpose: 'organizer' },
+      { account: mailboxA, gmailMessageId: 'native-canceled', email: 'canceled@example.org' },
+      { account: mailboxA, gmailMessageId: 'native-unknown', email: 'unknown@example.org' },
+      { account: mailboxA, gmailMessageId: 'native-failure', email: 'failure@example.org' },
+      { account: mailboxB, gmailMessageId: 'other-inbox', email: 'other@example.org' },
+    ];
+    const reads: string[] = [];
+    mockMailbox('native', () => { throw new Error('Scheduled sync must only read Gmail.'); }, url => {
+      if (url.searchParams.get('q') === 'in:scheduled') return Response.json({ messages: [{ id: 'still-scheduled' }] });
+      const id = url.pathname.split('/').at(-1)!;
+      reads.push(id);
+      if (id === 'native-unknown') return new Response(null, { status: 404 });
+      if (id === 'native-failure') return new Response(null, { status: 503 });
+      if (id === 'native-canceled') return Response.json({ id, labelIds: ['DRAFT'] });
+      const to = { 'native-sent': explicitAlias, 'native-followup': followup.email, 'native-organizer': organizer.email }[id];
+      assert.ok(to);
+      return Response.json({ id, threadId: `thread-${id}`, labelIds: ['SENT'], internalDate: String(Date.now()),
+        payload: { headers: [{ name: 'To', value: to }, { name: 'From', value: mailboxA }] } });
+    });
+    await assert.rejects(syncDeskMailbox(state, mailboxA), { status: 503 });
+    const saved = persisted().conferences[0];
+    assert.deepEqual(saved.gmailScheduled?.map(row => row.gmailMessageId),
+      ['still-scheduled', 'native-unknown', 'native-failure', 'other-inbox']);
+    assert.equal(saved.contacts[0].gmailMessageId, 'native-sent');
+    assert.equal(saved.contacts[0].sentEmail, explicitAlias);
+    assert.equal(saved.contacts[1].gmailMessageId, 'old-send');
+    assert.equal(saved.contacts[1].sentAt, oldSentAt);
+    assert.equal(saved.contacts[2].sentAt, undefined);
+    assert.equal(saved.contacts[2].priorOutreach?.gmailMessageId, 'native-organizer');
+    assert.ok(!reads.includes('other-inbox'));
+    assert.equal(persisted().queue.length, 0);
+  });
+});
+
+Deno.test('Scheduled discovery requires Desk draft evidence and preserves rows on incomplete Gmail listings', async () => {
+  await withGmailEnv(async () => {
+    const { state, queue, persisted } = fixture('native-draft', [mailboxA]);
+    const event = state.workspace.conferences[0];
+    const person = event.contacts[0];
+    queue.length = 0;
+    person.draft = { subject: 'Event invitation', body: 'Test', gmailId: 'desk-draft', gmailAccount: mailboxA,
+      gmailExportedEmail: person.email, gmailThreadId: 'known-thread', gmailExportedSubject: 'Event invitation' };
+    event.gmailScheduled = [{ account: mailboxA, gmailMessageId: 'missing-page', email: 'other@example.org' }];
+    mockMailbox('native-draft', () => { throw new Error('Scheduled sync must only read Gmail.'); }, url => {
+      if (url.searchParams.get('q') === 'in:scheduled') {
+        return Response.json({ messages: [{ id: 'desk-native' }, { id: 'unrelated-native' }], nextPageToken: 'next' });
+      }
+      if (url.pathname.endsWith('/missing-page')) return Response.json({ id: 'missing-page', labelIds: ['DRAFT'] });
+      if (url.pathname.endsWith('/threads/known-thread')) return Response.json({ messages: [] });
+      const id = url.pathname.split('/').at(-1)!;
+      if (!['desk-native', 'unrelated-native'].includes(id)) return undefined;
+      return Response.json({ id, threadId: id, payload: { headers: [
+        { name: 'From', value: mailboxA }, { name: 'To', value: person.email },
+        { name: 'Message-ID', value: id === 'desk-native' ? `<${gmailMessageId(event.id, person.id)}>` : '<unrelated@example.org>' },
+      ] } });
+    });
+    await syncDeskMailbox(state, mailboxA);
+    const saved = persisted().conferences[0].gmailScheduled!;
+    assert.deepEqual(saved.map(row => row.gmailMessageId), ['missing-page', 'desk-native']);
+    assert.equal(saved[1].contactId, person.id);
+    assert.equal(saved[1].scheduledAt, undefined);
+  });
+});
+
+Deno.test('A new Gmail-native timestamp invalidates an existing Desk preview for the same inbox', async () => {
+  await withGmailEnv(async () => {
+    const { state, queue } = fixture('native-spacing', [mailboxA]);
+    queue.length = 0;
+    const event = state.workspace.conferences[0];
+    const response = await workspaceAction(state, ['schedule', 'preview'], { email: mailboxA, count: 5 });
+    assert.ok(response && 'preview' in response);
+    event.gmailScheduled = [{ account: mailboxA, gmailMessageId: 'collision', email: 'different@example.org',
+      scheduledAt: response.preview.rows[0].scheduledAt }];
+    await assert.rejects(workspaceAction(state, ['schedule', 'confirm'], { token: response.preview.token }), /Review a fresh batch/);
+    assert.equal(queue.length, 0);
   });
 });

@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
-import { isPast, rankContacts, type Conference, type Contact, type QueueItem, type Workspace } from '../../../src/model.ts';
+import { isPast, rankContacts, type Conference, type Contact, type GmailScheduledMessage, type QueueItem, type Workspace } from '../../../src/model.ts';
 import {
   createGmailAuthorization, createGmailDraft, findGmailDraft, findGmailSent, findPriorGmailOutreach,
-  finishGmailAuthorization, getGmailAccessToken, GmailApiError, gmailMessageId, inspectGmailThread,
+  finishGmailAuthorization, getGmailAccessToken, getGmailScheduledMetadata, GmailApiError, gmailMessageId, inspectGmailThread, listGmailScheduled,
   sendGmailDraft, updateGmailDraft, type GmailAccount, type GmailAuthorization, type GmailConfig,
   type GmailDraft, type GmailDraftInput, type GmailMessage, type PriorGmailOutreach,
 } from '../../../server/gmail.ts';
-import { canReachContact, isOutreachOpen, outreachContactKeys, outreachDraftOwners, outreachReservations } from '../../../server/outreach-planner.ts';
+import { canReachContact, gmailScheduleTimes, isOutreachOpen, outreachContactKeys, outreachDraftOwners, outreachReservations } from '../../../server/outreach-planner.ts';
 import { writeDraft } from '../../../server/outbound-writer.ts';
 import { SCHEDULE_GAP_MS } from '../../../server/schedule.ts';
 import type { DeskState } from './storage.ts';
@@ -15,6 +15,7 @@ const MAX_SEND_LATENESS = 15 * 60_000;
 const REPLY_LOOKBACK = 14 * 86_400_000;
 const AUTO_SYNC_INTERVAL = 5 * 60_000;
 const WORK_WINDOW = 25_000;
+const NATIVE_SYNC_LIMIT = 24;
 
 export type DeskGoogleMode = 'login' | 'mailbox';
 type AuthCallback = { code?: string | null; state?: string | null };
@@ -186,6 +187,13 @@ async function reconcileOwnSend(
   return true;
 }
 
+function assertNativeSpacing(workspace: Workspace, account: string) {
+  const now = Date.now();
+  if (gmailScheduleTimes(workspace.conferences, account).some(time => Math.abs(Date.parse(time) - now) < SCHEDULE_GAP_MS)) {
+    throw new GmailApiError(409, 'A Gmail-scheduled email is close to this send time. Choose a new slot.');
+  }
+}
+
 async function processSend(state: DeskState, config: GmailConfig, item: QueueItem) {
   const { workspace } = state;
   const mailbox = getDeskMailbox(state, item.account);
@@ -199,6 +207,7 @@ async function processSend(state: DeskState, config: GmailConfig, item: QueueIte
     throw new GmailApiError(409, 'The worker missed the scheduled time. This email was held for review.');
   }
   if (!isOutreachOpen(event, new Date())) throw new GmailApiError(409, 'This conference’s outreach window has closed.');
+  assertNativeSpacing(workspace, mailbox.email);
   if (!canReachContact(person) || person.email !== item.email) throw new GmailApiError(409, 'A contact change needs review.');
   if (reserved(person, outreachReservations(workspace.conferences, workspace.queue, item.id)) ||
       hasConflictingDeskDraft(workspace, event, person, mailbox.email)) {
@@ -227,6 +236,7 @@ async function processSend(state: DeskState, config: GmailConfig, item: QueueIte
     if (Date.now() - Date.parse(item.scheduledAt) > MAX_SEND_LATENESS || !isOutreachOpen(event, new Date())) {
       throw new GmailApiError(409, 'The send window closed while Gmail was preparing the draft. Review it before scheduling again.');
     }
+    assertNativeSpacing(workspace, mailbox.email);
     item.sendingAt = new Date().toISOString();
     item.draftId = draftId;
     await state.save();
@@ -323,6 +333,113 @@ export async function exportDeskGmailDrafts(state: DeskState, event: Conference,
   return { synced, held, error };
 }
 
+type NativeSent = { id: string; threadId: string; sentAt: string; subject?: string; firstReplyAt?: string; replyCount?: number };
+type NativeOutcome = { remove: boolean; delivered?: NativeSent };
+
+function nativeContact(event: Conference, row: GmailScheduledMessage) {
+  if (row.contactId) return event.contacts.find(person => person.id === row.contactId);
+  const matching = event.contacts.filter(person => [person.email, person.sentEmail, person.draft?.gmailExportedEmail]
+    .some(email => email?.trim().toLowerCase() === row.email.trim().toLowerCase()));
+  return matching.length === 1 ? matching[0] : undefined;
+}
+
+function recordNativeSend(event: Conference, row: GmailScheduledMessage, delivered: NativeSent) {
+  const person = nativeContact(event, row);
+  if (!person || person.sentAt) return;
+  const subject = delivered.subject || row.subject;
+  if (row.purpose === 'organizer') {
+    person.previouslyContacted = true;
+    person.priorOutreach ??= {
+      account: row.account, email: row.email, sentAt: delivered.sentAt, subject,
+      gmailThreadId: delivered.threadId, gmailMessageId: delivered.id,
+    };
+    return;
+  }
+  Object.assign(person, {
+    gmailAccount: row.account, gmailMessageId: delivered.id, gmailThreadId: delivered.threadId,
+    sentEmail: row.email, sentSubject: subject, sentAt: delivered.sentAt,
+    repliedAt: delivered.firstReplyAt, replyCount: delivered.replyCount,
+  });
+}
+
+async function checkMissingNative(access: string, row: GmailScheduledMessage, complete: boolean): Promise<NativeOutcome> {
+  const found = await getGmailScheduledMetadata(access, row.gmailMessageId);
+  if (found?.sent) {
+    const threadId = found.threadId || row.gmailThreadId;
+    const delivered = threadId && found.sentAt && found.email === row.email.toLowerCase() &&
+      (!found.sender || found.sender === row.account.toLowerCase()) ? {
+        id: found.id, threadId, sentAt: found.sentAt, subject: found.subject,
+      } : undefined;
+    return { remove: true, delivered };
+  }
+  if (!complete) return { remove: false };
+
+  // A manual Gmail send can replace the scheduled message ID. The known
+  // thread still needs one exact subject/recipient match after observation.
+  const since = row.observedAt || row.scheduledAt;
+  if (row.gmailThreadId && row.subject && since && Date.parse(since) <= Date.now()) {
+    const sent = await inspectGmailThread(access, {
+      threadId: row.gmailThreadId, recipient: row.email, draftSubject: row.subject, draftExportedAt: since,
+    });
+    if (sent) return { remove: true, delivered: {
+      id: sent.sentMessageId, threadId: row.gmailThreadId, sentAt: sent.sentAt, subject: row.subject,
+      firstReplyAt: sent.firstReplyAt, replyCount: sent.replyCount,
+    } };
+  }
+  return { remove: Boolean(found?.draftOrTrash) };
+}
+
+async function refreshGmailScheduled(state: DeskState, access: string, email: string, startedAt: number) {
+  const { conferences } = state.workspace;
+  const known = conferences.flatMap(event => (event.gmailScheduled || []).filter(row => row.account === email).map(row => ({ event, row })));
+  const proofs = conferences.flatMap(event => event.contacts.flatMap(person => {
+    const draft = person.draft;
+    const recipient = draft?.gmailExportedEmail?.trim().toLowerCase();
+    if (!draft?.gmailId || draft.gmailAccount !== email || !recipient || person.sentAt) return [];
+    return [{ event, person, recipient, rfc: gmailMessageId(event.id, person.id), thread: draft.gmailThreadId, subject: draft.gmailExportedSubject }];
+  }));
+  if (!known.length && !proofs.length) return;
+  const listing = await listGmailScheduled(access);
+  const listed = new Set(listing.ids);
+  const knownCounts = new Map<string, number>();
+  for (const { row } of known) knownCounts.set(row.gmailMessageId, (knownCounts.get(row.gmailMessageId) || 0) + 1);
+  const missing = known.filter(({ row }) => !listed.has(row.gmailMessageId)).slice(0, NATIVE_SYNC_LIMIT);
+  let changed = false;
+  let failure: unknown;
+  for (let offset = 0; offset < missing.length && Date.now() - startedAt < WORK_WINDOW; offset += 4) {
+    const batch = missing.slice(offset, offset + 4);
+    const outcomes = await Promise.allSettled(batch.map(({ row }) => checkMissingNative(access, row, listing.complete)));
+    outcomes.forEach((outcome, index) => {
+      if (outcome.status === 'rejected') { failure ??= outcome.reason; return; }
+      if (!outcome.value.remove) return;
+      const { event, row } = batch[index];
+      if (outcome.value.delivered && knownCounts.get(row.gmailMessageId) === 1) recordNativeSend(event, row, outcome.value.delivered);
+      event.gmailScheduled = event.gmailScheduled?.filter(item => item !== row);
+      changed = true;
+    });
+  }
+  const fresh = proofs.length ? listing.ids.filter(id => !knownCounts.has(id)).slice(0, NATIVE_SYNC_LIMIT) : [];
+  for (let offset = 0; offset < fresh.length && Date.now() - startedAt < WORK_WINDOW; offset += 4) {
+    const outcomes = await Promise.allSettled(fresh.slice(offset, offset + 4).map(id => getGmailScheduledMetadata(access, id)));
+    for (const outcome of outcomes) {
+      if (outcome.status === 'rejected') { failure ??= outcome.reason; continue; }
+      const item = outcome.value;
+      if (!item?.email || item.sent || item.draftOrTrash || item.sender !== email) continue;
+      const matches = proofs.filter(proof => proof.recipient === item.email &&
+        (proof.rfc === item.rfcMessageId || (proof.thread && proof.thread === item.threadId && proof.subject && proof.subject === item.subject)));
+      if (matches.length !== 1) continue;
+      const [{ event, person }] = matches;
+      (event.gmailScheduled ??= []).push({
+        account: email, email: item.email, gmailMessageId: item.id, gmailThreadId: item.threadId,
+        subject: item.subject, contactId: person.id, observedAt: new Date().toISOString(), purpose: 'prospect',
+      });
+      changed = true;
+    }
+  }
+  if (changed) await state.save();
+  if (failure) throw failure;
+}
+
 export async function syncDeskMailbox(state: DeskState, email?: string, options: { full?: boolean; limit?: number } = {}) {
   const mailbox = getDeskMailbox(state, email);
   const { workspace, secrets } = state;
@@ -340,12 +457,16 @@ export async function syncDeskMailbox(state: DeskState, email?: string, options:
     if (person.sentAt && person.gmailAccount && person.gmailAccount !== mailbox.email) return [];
     return trackedSend || trackedDraft || unresolved.has(key) ? [{ event, person, key }] : [];
   })).sort((a, b) => a.key.localeCompare(b.key));
-  if (!tracked.length) return 0;
+  const needsNative = workspace.conferences.some(event => event.gmailScheduled?.some(row => row.account === mailbox.email));
+  if (!tracked.length && !needsNative) return 0;
 
   const previousIndex = tracked.findIndex(entry => entry.key === previous?.cursor);
   const ordered = [...tracked.slice(previousIndex + 1), ...tracked.slice(0, previousIndex + 1)];
   const count = Math.min(ordered.length, options.limit ?? 18);
   const access = await getGmailAccessToken(requireConfig(), mailbox);
+  let nativeFailure: unknown;
+  try { await refreshGmailScheduled(state, access, mailbox.email, startedAt); }
+  catch (error) { nativeFailure = error; }
   let synced = 0;
   for (let offset = 0; offset < count; offset += 4) {
     if (Date.now() - startedAt > WORK_WINDOW) break;
@@ -369,6 +490,7 @@ export async function syncDeskMailbox(state: DeskState, email?: string, options:
     const failure = outcomes.find(result => result.status === 'rejected');
     if (failure) throw failure.reason;
   }
+  if (nativeFailure) throw nativeFailure;
   return synced;
 }
 

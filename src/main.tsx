@@ -9,7 +9,7 @@ import '@fontsource-variable/dm-sans';
 import './styles.css';
 import {
   type ApolloPreview, type BatchPreview, type Bucket, type Conference, type Contact, type Provider, type Snapshot,
-  BUCKETS, TIME_ZONE, campaignCounts, gmailDraftsUrl, isPast, rankContacts, target,
+  BUCKETS, TIME_ZONE, campaignCounts, gmailDraftsUrl, isGmailSchedulePending, isPast, rankContacts, scheduledCount, target,
 } from './model';
 import { api, deskSessionEvent, getDeskSession, hostedDesk, setDeskSession } from './api';
 import { gmailConnectRoute, startGmailConnection, startOwnerSignIn } from './gmail-connect';
@@ -18,7 +18,7 @@ import { ContactForm, EventForm, RosterForm, ScheduleForm, type EventInput } fro
 import { ConnectionsView, IcpView } from './settings';
 import { ApolloReviewModal, ApolloWaterfallResults } from './apollo-waterfall';
 import { MailboxView } from './mailbox';
-import { canReachContact, isOutreachOpen, outreachContactKeys } from './outreach-identity';
+import { canReachContact, isOutreachOpen, outreachContactKeys, outreachEmailKey } from './outreach-identity';
 import { outreachReferences } from './outreach-summary';
 
 type Filter = 'upcoming' | 'all' | 'past';
@@ -50,7 +50,7 @@ function Sidebar({ snapshot, route, navigate, mobileOpen, collapsed, close }: { 
     { name: 'Connections', key: 'connections', icon: Link2 },
   ];
   const upcoming = [...snapshot.conferences].filter(e => !isPast(e)).sort((a, b) => (a.startDate || '9999').localeCompare(b.startDate || '9999')).slice(0, 5);
-  const activeCount = snapshot.queue.filter(item => item.status === 'scheduled' || item.status === 'sending').length;
+  const activeCount = scheduledCount(snapshot.conferences, snapshot.queue);
   return <>
     {mobileOpen && <button className="sidebar-overlay" aria-label="Close navigation" onClick={close}/>}
     <aside id="workspace-sidebar" className={`sidebar ${mobileOpen ? 'shown' : ''}`} aria-label="Sidebar">
@@ -86,12 +86,12 @@ function Dashboard({ snapshot, readyEvents, onAdd, navigate, onSchedule, onSync,
     return (filter === 'all' || (filter === 'past' ? isPast(event) : !isPast(event))) &&
       `${event.title} ${event.location || ''}`.toLowerCase().includes(query.toLowerCase().trim());
   }).sort((a, b) => filter === 'past' ? (b.startDate || '').localeCompare(a.startDate || '') : (a.startDate || '9999').localeCompare(b.startDate || '9999'));
-  const activeCount = queue.filter(item => ['scheduled', 'sending'].includes(item.status)).length;
+  const activeCount = scheduledCount(conferences, queue);
   const metricTiles = [
     { label: 'Upcoming', value: upcoming.length, note: 'Conferences on your radar', icon: CalendarDays, color: 'peach' },
     { label: 'Sent', value: sent, note: 'Across upcoming conferences', icon: Send, color: 'yellow' },
     { label: 'Replies', value: replies, note: sent ? `${Math.round(100 * replies / sent)}% reply rate` : 'Across upcoming conferences', icon: MessageSquare, color: 'rose' },
-    { label: 'Ready to email', value: snapshot.outreachReady, note: activeCount ? `${activeCount} already queued` : 'Unique contacts with sourced email', icon: Inbox, color: 'blue' },
+    { label: 'Ready to email', value: snapshot.outreachReady, note: activeCount ? `${activeCount} already scheduled` : 'Unique contacts with sourced email', icon: Inbox, color: 'blue' },
   ];
   return <>
     <header className="hero">
@@ -124,7 +124,7 @@ function Dashboard({ snapshot, readyEvents, onAdd, navigate, onSchedule, onSync,
 function attendeeStatus(person: Contact, scheduled: string | undefined) {
   if (person.repliedAt) return { label: 'Replied', color: 'green' };
   if (person.sentAt) return { label: 'Sent', color: 'blue' };
-  if (scheduled) return { label: scheduled, color: scheduled === 'Held' ? 'yellow' : 'blue' };
+  if (scheduled) return { label: scheduled, color: scheduled === 'Held' || scheduled === 'Check in Gmail' ? 'yellow' : 'blue' };
   if (person.previouslyContacted) return { label: 'Prior outreach', color: 'gray' };
   if (!target(person)) return { label: 'Outside queue', color: 'gray' };
   if (!person.email) return { label: 'Needs email', color: 'gray' };
@@ -188,6 +188,10 @@ function EventView({ event, snapshot, references, navigate, open, onSchedule, on
     [person.name, person.company, person.title, person.email].filter(Boolean).join(' ').toLowerCase().includes(query.toLowerCase().trim()));
   const statuses = new Map(snapshot.queue.filter(item => item.conferenceId === event.id && ['scheduled', 'sending', 'failed'].includes(item.status))
     .map(item => [item.contactId, item.status === 'failed' ? 'Held' : item.status === 'sending' ? 'Sending' : 'Scheduled']));
+  for (const item of event.gmailScheduled ?? []) {
+    const contactId = item.contactId || event.contacts.find(person => outreachEmailKey(person.email) === outreachEmailKey(item.email))?.id;
+    if (contactId) statuses.set(contactId, isGmailSchedulePending(item) ? 'Scheduled in Gmail' : 'Check in Gmail');
+  }
   const pageSize = 30;
   const shown = scoped.slice((page - 1) * pageSize, page * pageSize);
   const jobs = snapshot.jobs.filter(job => job.conferenceId === event.id);
@@ -206,7 +210,7 @@ function EventView({ event, snapshot, references, navigate, open, onSchedule, on
       <div className="overview-stat"><Users size={16}/><span>On roster</span><strong>{stats.total}</strong></div>
       <div className="overview-stat"><Send size={16}/><span>Sent</span><strong>{stats.sent}</strong></div>
       <div className="overview-stat"><MessageSquare size={16}/><span>Replies</span><strong>{stats.replies}</strong><small>{stats.replyRate}% of sent</small></div>
-      <div className="overview-stat"><Clock3 size={16}/><span>Left to send</span><strong>{stats.left}</strong>{stats.scheduled > 0 && <small>{stats.scheduled} queued</small>}</div>
+      <div className="overview-stat"><Clock3 size={16}/><span>Left to schedule</span><strong>{stats.left}</strong>{stats.scheduled > 0 && <small>{stats.scheduled} scheduled</small>}</div>
       <div className="overview-progress"><div><span>Outreach progress</span><strong>{stats.progress}%</strong></div><div className="progress"><span style={{ width: `${stats.progress}%` }}/></div></div>
     </div>
     {automaticDiscovery ? <ActionBanner
@@ -238,12 +242,12 @@ function EventView({ event, snapshot, references, navigate, open, onSchedule, on
           const status = attendeeStatus(person, statuses.get(person.id));
           const related = person.sentAt || person.repliedAt || statuses.has(person.id) ? undefined :
             outreachContactKeys(person).map(key => references.get(key)).find(ref => ref && (ref.conferenceId !== event.id || ref.contactId !== person.id));
-          const relatedLabel = related && ({ sent: 'Sent for', scheduled: 'Queued for', held: 'Held for', 'gmail-draft': 'Drafted for', prior: 'Prior outreach found in' }[related.kind]);
+          const relatedLabel = related && ({ sent: 'Sent for', scheduled: 'Queued for', 'gmail-scheduled': 'Gmail schedule for', held: 'Held for', 'gmail-draft': 'Drafted for', prior: 'Prior outreach found in' }[related.kind]);
           const attendance = { attendee: 'Attendee', speaker: 'Speaker', organizer: 'Organizer', unconfirmed: 'Unconfirmed' }[person.attendance];
           return <tr key={person.id}><td><button className="person-button" onClick={() => open({ kind: 'contact', eventId: event.id, personId: person.id })}><span className={`person-avatar ${eventColor(person.id)}`}>{person.name.split(/\s+/).slice(0, 2).map(part => part[0]).join('')}</span><span><strong>{person.name}</strong><small>{[person.title, person.company].filter(Boolean).join(' · ') || 'Role to research'}</small></span></button></td>
             <td><div className="fit-cell"><BucketBadge bucket={person.bucket}/><small>{person.score}</small></div></td>
             <td><span className="attendance">{attendance}</span></td><td>{related ? <button className="outreach-status gray related-outreach" title={`${relatedLabel} ${related.title}`}
-              onClick={() => open({ kind: 'contact', eventId: related.conferenceId, personId: related.contactId })}><span className="dot"/>{relatedLabel} {related.title}</button> :
+              onClick={() => related.contactId ? open({ kind: 'contact', eventId: related.conferenceId, personId: related.contactId }) : navigate('event/' + related.conferenceId)}><span className="dot"/>{relatedLabel} {related.title}</button> :
               <span className={`outreach-status ${status.color}`}><span className="dot"/>{status.label}</span>}</td>
             <td><button className="icon-button" aria-label={`Open ${person.name}`} onClick={() => open({ kind: 'contact', eventId: event.id, personId: person.id })}><ArrowUpRight size={16}/></button></td></tr>;
         })}</tbody></table>
