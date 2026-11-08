@@ -1,4 +1,4 @@
-import type { ICP } from '../src/model';
+import type { ICP } from '../src/model.ts';
 
 export const defaultIcp: ICP = {
   name: 'Oasis Simulations',

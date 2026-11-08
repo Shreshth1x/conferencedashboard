@@ -1,0 +1,6 @@
+project_id = "conference-desk"
+
+[functions.desk]
+verify_jwt = false
+entrypoint = "./functions/desk/index.ts"
+import_map = "./functions/desk/deno.json"

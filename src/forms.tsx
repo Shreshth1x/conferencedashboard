@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react';
+import { hostedDesk } from './api';
 import { ArrowRight, CalendarClock, FileUp, LoaderCircle, Mail, Save, Sparkles } from 'lucide-react';
 import { gmailThreadUrl, type BatchPreview, type Conference, type Contact } from './model';
 import { BucketBadge, dateRange, External, Modal, slotTime } from './components';
@@ -87,13 +88,15 @@ export function ContactForm({ person, disabled, busy, codex, close, save, polish
   </Modal>;
 }
 
-export function ScheduleForm({ event, conferences, account, preview, close, back, connect, load, confirm, busy }: {
-  event?: Conference; conferences: Conference[]; account?: string; preview?: BatchPreview; close: () => void;
-  back: () => void; connect: () => void; load: (count: number, now: boolean, conferenceIds: string[]) => void;
+export function ScheduleForm({ event, conferences, account, mailboxes, preview, close, back, connect, load, confirm, busy }: {
+  event?: Conference; conferences: Conference[]; account?: string; mailboxes?: string[]; preview?: BatchPreview; close: () => void;
+  back: () => void; connect: () => void; load: (count: number, now: boolean, conferenceIds: string[], sender?: string) => void;
   confirm: (token: string) => void; busy: boolean;
 }) {
   const [count, setCount] = useState(5);
   const [now, setNow] = useState(false);
+  const [sender, setSender] = useState(account);
+  const sendingAccount = sender && mailboxes?.includes(sender) ? sender : account;
   const [selected, setSelected] = useState(() => new Set((event ? [event] : conferences).map(candidate => candidate.id)));
   const chosen = event ? [event.id] : conferences.filter(candidate => selected.has(candidate.id)).map(candidate => candidate.id);
   const submit = (e: FormEvent) => {
@@ -101,7 +104,7 @@ export function ScheduleForm({ event, conferences, account, preview, close, back
     if (preview) {
       if (preview.account) confirm(preview.token);
       else connect();
-    } else load(count, now, chosen);
+    } else load(count, now, chosen, sendingAccount);
   };
   const eventCount = preview ? new Set(preview.rows.map(row => row.conferenceId)).size : chosen.length;
   const description = preview
@@ -130,12 +133,17 @@ export function ScheduleForm({ event, conferences, account, preview, close, back
             <span><strong>{candidate.shortTitle || candidate.title}</strong><small>{dateRange(candidate)}</small></span>
           </label>) : <p>Add an upcoming conference with sourced email addresses to start.</p>}
         </fieldset>}
+        {mailboxes && mailboxes.length > 1 && <label className="field">Send from<select value={sendingAccount} onChange={e => setSender(e.target.value)}>
+          {mailboxes.map(email => <option key={email} value={email}>{email}</option>)}
+        </select></label>}
         <div className="field-row schedule-controls">
           <label className="field">Batch size<select value={count} disabled={now} onChange={e => setCount(Number(e.target.value))}>{[5, 6, 7, 8, 9, 10].map(n => <option key={n} value={n}>{n} emails</option>)}</select></label>
           {account && <label className="checkbox"><input type="checkbox" checked={now} onChange={e => setNow(e.target.checked)}/> Send the next eligible email now</label>}
         </div>
       </>}
-      <p className="field-note">{preview && !preview.account ? 'Connect Gmail when you’re ready to confirm a batch.' : 'Keep Conference Desk running through the send times. You can cancel pending emails from the queue.'}</p>
+      <p className="field-note">{preview && !preview.account ? 'Connect Gmail when you’re ready to confirm a batch.' : hostedDesk
+        ? 'Scheduled emails run in the cloud. You can close this page or turn off your Mac.'
+        : 'Keep Conference Desk running through the send times. You can cancel pending emails from the queue.'}</p>
       <div className="form-actions">
         <button className="button secondary" type="button" onClick={preview ? back : close} disabled={busy}>{preview ? 'Edit batch' : 'Cancel'}</button>
         <button className="button primary" disabled={busy || (!preview && !chosen.length)}>

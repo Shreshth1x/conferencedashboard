@@ -1,4 +1,4 @@
-import { api } from './api';
+import { api, deskReturnUrl, hostedDesk } from './api';
 
 export const gmailConnectRoute = 'connect-gmail';
 const callbackPath = '/api/gmail/callback';
@@ -7,7 +7,31 @@ export function defaultGmailCallback() {
   return window.location.origin.replace('://localhost', '://127.0.0.1') + callbackPath;
 }
 
+function openGoogleConsent(url: string, redirectUri?: string) {
+  let authorization: URL;
+  try {
+    authorization = new URL(url);
+    if (authorization.origin !== 'https://accounts.google.com' || authorization.pathname !== '/o/oauth2/v2/auth' ||
+        authorization.username || authorization.password ||
+        (redirectUri && authorization.searchParams.get('redirect_uri') !== redirectUri)) throw new Error();
+  } catch {
+    throw new Error('Conference Desk received an invalid Google authorization link. Try again or check the Google OAuth configuration.');
+  }
+  window.location.assign(authorization.href);
+}
+
+export async function startOwnerSignIn() {
+  const { url } = await api<{ url: string }>('/session/start', { returnUrl: deskReturnUrl() }, true);
+  openGoogleConsent(url);
+}
+
 export async function startGmailConnection(redirectUri?: string) {
+  if (hostedDesk) {
+    const { url } = await api<{ url: string }>('/gmail/connect', { returnUrl: deskReturnUrl('#connections') });
+    openGoogleConsent(url, redirectUri);
+    return;
+  }
+
   let callback: URL;
   try {
     callback = new URL(redirectUri || defaultGmailCallback());
@@ -25,13 +49,5 @@ export async function startGmailConnection(redirectUri?: string) {
   }
 
   const { url } = await api<{ url: string }>('/gmail/connect', {});
-  let authorization: URL;
-  try {
-    authorization = new URL(url);
-    if (authorization.origin !== 'https://accounts.google.com' || authorization.pathname !== '/o/oauth2/v2/auth' ||
-        authorization.username || authorization.password || authorization.searchParams.get('redirect_uri') !== callback.href) throw new Error();
-  } catch {
-    throw new Error('Conference Desk received an invalid Google authorization link. Check the Gmail OAuth settings and try again.');
-  }
-  window.location.assign(authorization.href);
+  openGoogleConsent(url, callback.href);
 }

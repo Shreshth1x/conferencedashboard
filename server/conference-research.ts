@@ -6,7 +6,7 @@ import { isIP } from "node:net";
 import { load, type CheerioAPI } from "cheerio";
 import { parse as parseCsv } from "csv-parse/sync";
 import ipaddr from "ipaddr.js";
-import { defaultIcp } from "./default-icp";
+import { defaultIcp } from "./default-icp.ts";
 
 export type Attendance = "attendee" | "speaker" | "organizer" | "unconfirmed";
 export type ResearchContact = {
@@ -674,7 +674,7 @@ function differentEdition(path: string, targetYear: string | undefined) {
   return Boolean(targetYear && years.length && !years.includes(targetYear));
 }
 
-export async function researchConference(input: ResearchInput, options: { exaKey?: string; mcp?: ResearchMcp } = {}): Promise<ResearchResult> {
+export async function researchConference(input: ResearchInput, options: { exaKey?: string; mcp?: ResearchMcp; sourceLinksOnly?: boolean } = {}): Promise<ResearchResult> {
   const rawName = clean(input.name, 500);
   const inputUrl = clean(input.url, 2048) ?? rawName?.match(/https?:\/\/[^\s<>"']+/i)?.[0];
   const bareDomain = !inputUrl && rawName && /^(?:www\.)?[a-z0-9.-]+\.[a-z]{2,}(?:\/\S*)?$/i.test(rawName) ? rawName : undefined;
@@ -702,6 +702,12 @@ export async function researchConference(input: ResearchInput, options: { exaKey
     result.notes.push(searchFailed ? "Add the official event URL or import a roster to continue."
       : options.mcp || exaKey ? "Search returned no matching event pages. Add the event link or import a roster."
       : "Add the official event URL, import a roster, or connect Exa for name-based search.");
+  }
+  if (options.sourceLinksOnly) {
+    result.sources = [...new Set(queue.map(url => url.href))].slice(0, MAX_PAGES)
+      .map(url => ({ url, label: url === startUrl?.href ? "Provided conference page" : "Public conference search" }));
+    if (result.needsRoster) result.notes.push("Import a roster or use Autumn to find attendees from public sources.");
+    return result;
   }
   const scanned = new Set<string>();
   for (let offset = 0; queue.length && offset < MAX_PAGES;) {

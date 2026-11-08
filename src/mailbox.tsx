@@ -146,15 +146,15 @@ type MailboxProps = {
   onOpenContact?: (conferenceId: string, contactId: string) => void;
 };
 
-function MailboxRow({ entry, view, mailbox, busy, onCancel, navigate, onOpenContact }: {
+function MailboxRow({ entry, view, mailboxes, busy, onCancel, navigate, onOpenContact }: {
   entry: Entry;
   view: View;
-  mailbox?: string;
+  mailboxes: Set<string>;
 } & Pick<MailboxProps, 'busy' | 'onCancel' | 'navigate' | 'onOpenContact'>) {
   const item = entry.queueItem;
   const link = gmailThreadUrl(entry.threadAccount || entry.account, entry.threadId);
   const Icon = entry.status === 'failed' ? TriangleAlert : entry.status === 'replied' ? MessageSquare : entry.status === 'sent' ? Send : Clock3;
-  const paused = view === 'pending' && entry.status === 'scheduled' && entry.account && mailbox?.toLowerCase() !== entry.account.toLowerCase();
+  const paused = view === 'pending' && entry.status === 'scheduled' && entry.account && !mailboxes.has(entry.account.toLowerCase());
   const status = paused ? 'Connect sender mailbox' : entry.status === 'replied' && (entry.replyCount ?? 0) > 1 ? `${entry.replyCount} replies` : displayStatus[entry.status];
   return <li className="mailbox-row">
     <div className="mailbox-contact">
@@ -187,19 +187,24 @@ export function MailboxView({ snapshot, navigate, onCancel, onSync, busy, onSche
   const [view, setView] = useState<View>('pending');
   const [query, setQuery] = useState('');
   const [eventId, setEventId] = useState('');
+  const [sender, setSender] = useState('');
   const [limit, setLimit] = useState(pageSize);
   const entries = useMemo(() => makeEntries(snapshot), [snapshot]);
   const matched = entries[view].filter(entry => {
     if (eventId && entry.conferenceId !== eventId) return false;
+    if (sender && entry.account?.toLowerCase() !== sender) return false;
     return [entry.name, entry.email, entry.account, entry.conference, entry.subject].join(' ').toLowerCase().includes(query.trim().toLowerCase());
   });
   const results = groupEntries(matched.slice(0, limit));
   const mailbox = snapshot.connections.gmail;
-  const next = entries.pending.find(entry => entry.status === 'scheduled' && entry.account?.toLowerCase() === mailbox?.toLowerCase());
+  const connected = snapshot.connections.mailboxes ?? (mailbox ? [mailbox] : []);
+  const mailboxes = new Set(connected.map(email => email.toLowerCase()));
+  const senderOptions = [...new Set([...connected, ...Object.values(entries).flatMap(items => items.flatMap(item => item.account ? [item.account] : []))].map(email => email.toLowerCase()))].sort();
+  const next = entries.pending.find(entry => entry.status === 'scheduled' && entry.account && mailboxes.has(entry.account.toLowerCase()));
   const views: { key: View; name: string }[] = [{ key: 'pending', name: 'Pending & held' }, { key: 'sent', name: 'Sent' }, { key: 'replies', name: 'Replies' }];
   if (entries.cancelled.length) views.push({ key: 'cancelled', name: 'Cancelled' });
   const eventOptions = [...snapshot.conferences].sort((a, b) => (a.shortTitle || a.title).localeCompare(b.shortTitle || b.title));
-  const noResults = Boolean(query.trim() || eventId);
+  const noResults = Boolean(query.trim() || eventId || sender);
 
   return <div className="mailbox">
     <header className="view-head mailbox-head">
@@ -209,8 +214,8 @@ export function MailboxView({ snapshot, navigate, onCancel, onSync, busy, onSche
         <button className="button primary" onClick={onSchedule} disabled={busy}><CalendarClock size={16}/> Schedule next batch</button>
       </div>
     </header>
-    {mailbox && <div className="mailbox-account"><span><span className="connection-dot connected"/> Sending from <strong>{mailbox}</strong></span>
-      {next?.date && <span><Clock3 size={14}/> Next send {entryTime(next.date)}</span>}
+    {mailbox && <div className="mailbox-account"><span><span className="connection-dot connected"/> {connected.length > 1 ? 'Default sender' : 'Sending from'} <strong>{mailbox}</strong></span>
+      {next?.date && <span><Clock3 size={14}/> Next send {entryTime(next.date)}{connected.length > 1 && <> from <strong>{next.account}</strong></>}</span>}
     </div>}
     <div className="list-toolbar mailbox-toolbar">
       <div className="segments" aria-label="Outreach status">
@@ -223,6 +228,10 @@ export function MailboxView({ snapshot, navigate, onCancel, onSync, busy, onSche
           <option value="">All conferences</option>
           {eventOptions.map(event => <option key={event.id} value={event.id}>{event.shortTitle || event.title}</option>)}
         </select>
+        {(senderOptions.length > 1 || sender) && <select aria-label="Filter outreach by sender" value={sender} onChange={event => { setSender(event.target.value); setLimit(pageSize); }}>
+          <option value="">All senders</option>
+          {senderOptions.map(email => <option key={email} value={email}>{email}</option>)}
+        </select>}
         <div className="search"><Search size={16} aria-hidden="true"/><input aria-label="Search outreach" placeholder="Find a person or email" value={query} onChange={event => { setQuery(event.target.value); setLimit(pageSize); }}/>
           {query && <button className="icon-button mailbox-clear" onClick={() => { setQuery(''); setLimit(pageSize); }} aria-label="Clear search"><X size={14}/></button>}
         </div>
@@ -231,7 +240,7 @@ export function MailboxView({ snapshot, navigate, onCancel, onSync, busy, onSche
     {results.size > 0 ? <div className="mailbox-timeline">
       {[...results].map(([day, rows]) => <section className="mailbox-day" key={day}>
         <h2>{day}{day === 'Needs review' && <small>{rows.length} shown</small>}</h2>
-        <ul>{rows.map(entry => <MailboxRow key={entry.key} entry={entry} view={view} mailbox={mailbox} busy={busy} onCancel={onCancel} navigate={navigate} onOpenContact={onOpenContact}/>)}</ul>
+        <ul>{rows.map(entry => <MailboxRow key={entry.key} entry={entry} view={view} mailboxes={mailboxes} busy={busy} onCancel={onCancel} navigate={navigate} onOpenContact={onOpenContact}/>)}</ul>
       </section>)}
       {matched.length > limit && <div className="mailbox-pagination"><span>Showing {limit} of {matched.length}</span><button className="button secondary" onClick={() => setLimit(limit + pageSize)}>Show more</button></div>}
     </div> : noResults ?

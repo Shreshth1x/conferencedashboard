@@ -1,6 +1,6 @@
 # Conference Desk
 
-A local conference outreach workspace for Oasis Simulations. The home screen shows upcoming events, outreach progress, sends, replies, and remaining contacts. Open an event to see the ranked roster, draft messages, or queue the next batch.
+A conference outreach workspace for Oasis Simulations. The home screen shows upcoming events, outreach progress, sends, replies, and remaining contacts. Open an event to see the ranked roster, draft messages, or queue the next batch.
 
 ## Run
 
@@ -16,13 +16,15 @@ Open [Conference Desk](http://127.0.0.1:4173). The server binds to loopback. The
 
 The workspace and saved connections live in the ignored `.data/` folder. If `.data/import-conferences.json` exists, a fresh workspace starts with that historical import. Back up this folder locally if you want to preserve conference data and pending sends. It contains contact data and connection secrets.
 
-## Host a private workspace
+## Hosted workspace
 
-Run one Node process on a VM with a service manager such as systemd. Build with `npm ci` and `npm run build`, then run `npm start` as an unprivileged user. The process listens on `127.0.0.1:4173`. Use an authenticated SSH tunnel to reach the dashboard from your browser. Keep the dashboard port off public ingress because the dashboard can read your roster and operate your mailbox.
+Open [Conference Desk on GitHub Pages](https://shreshth1x.github.io/conferencedashboard/). Sign in with the workspace owner's Google account, then connect each sending inbox in **Connections**. Choose a sender when you preview a batch. Approved emails stay assigned to that inbox.
 
-Set `CONFERENCE_DATA_DIR` to a private directory on persistent disk. To use Supabase instead, apply the SQL migration in `supabase/migrations/`, set `CONFERENCE_DATABASE_URL` to a direct or session-pooler connection URI, and set `CONFERENCE_SECRETS_KEY` to 32 random bytes encoded as base64. Keep the same key in the host’s secret store between deployments. If the database requires a separate trusted root, set `CONFERENCE_DATABASE_CA` to its PEM certificate. The database connection holds a lock so only one worker can use a workspace. The migration keeps the state table outside the public API and the server encrypts saved connector credentials.
+GitHub Pages serves the frontend. The existing Supabase project hosts the private API, encrypted mailbox connections, and send queue. Supabase Cron checks for due work every minute and calls the Edge Function, so the dashboard and Mac can be closed. Gmail test accounts may need to reconnect after seven days. The hosted workspace starts with its own data. The local version still uses the local workspace unless explicitly configured for PostgreSQL.
 
-Start a hosted instance with an empty data directory to set up connections from scratch. If moving a workspace, stop the original worker before importing data with scheduled sends. Apply connector secrets on the host and authorize Gmail and Apollo from that instance. Local Codex credentials are separate from the hosted process.
+The Pages workflow builds the static interface from `main`. Deploy backend changes with `supabase functions deploy desk --project-ref <project-ref> --use-api` after applying migrations. Configure `DESK_SITE_URL`, `DESK_OWNER_EMAIL`, the Gmail OAuth settings, and a stable `CONFERENCE_SECRETS_KEY` as Edge secrets. Set the same worker token in `DESK_CRON_SECRET` and Vault's `desk_cron_secret`. Add the Supabase URL in Vault under `desk_project_url`.
+
+The hosted app includes Exa public search links and roster import. Save an Autumn API key in **Connections** to discover or enrich contacts. Hosted Apollo uses its server-side MCP with a master key and keeps the per-batch credit approval. ChatGPT-backed draft polish runs in the local app.
 
 ## From an event to an email batch
 
@@ -34,7 +36,7 @@ Start a hosted instance with an empty data directory to set up connections from 
 
 Direct fits go first, then potential introducers. Within each fit group, the planner rotates conferences and chooses the strongest eligible match for a shared recipient. It keeps confirmed slots fixed and fills open morning and afternoon slots starting the next Chicago calendar day. The same inbox has at least five minutes between sends. Existing outreach, queued sends, and Gmail drafts can reserve a recipient across events.
 
-Keep the server running and the Mac awake through scheduled sends. The app uses a local persistent queue for delivery through Gmail. A send more than 15 minutes past its slot is held for review. The worker checks for prior Gmail outreach, reconciles known sends, and holds ambiguous attempts. **Sync Gmail** checks tracked threads for direct replies. In **Send queue**, use **Pending & held**, **Sent**, and **Replies** to find the conference, sender, recipient, actual timestamp, and Gmail conversation. Cancel a pending send there to free its slot and recipient for a future batch.
+The hosted queue runs through Supabase. When using the local dashboard, keep the server running and the Mac awake through scheduled sends. A send more than 15 minutes past its slot is held for review. The worker checks for prior Gmail outreach, reconciles known sends, and holds ambiguous attempts. **Sync Gmail** checks tracked threads for direct replies. In **Send queue**, use **Pending & held**, **Sent**, and **Replies** to find the conference, sender, recipient, actual timestamp, and Gmail conversation. Cancel a pending send there to free its slot and recipient for a future batch.
 
 ## Connections
 

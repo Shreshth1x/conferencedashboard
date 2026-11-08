@@ -1,4 +1,4 @@
-import { localDate, type Conference, type Contact } from './model';
+import { localDate, type Conference, type Contact } from './model.ts';
 
 export function outreachEmailKey(email?: string) {
   const address = email?.normalize('NFKC').trim().toLowerCase() || '';

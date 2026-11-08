@@ -133,6 +133,7 @@ export interface Connections {
   gmailConfigured: boolean;
   gmailRedirectUri?: string;
   gmail?: string;
+  mailboxes?: string[];
   apollo: boolean;
   autumn: boolean;
   exa: boolean;

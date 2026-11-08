@@ -1,4 +1,4 @@
-import { StrictMode, useCallback, useEffect, useMemo, useState } from 'react';
+import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   ArrowDown, ArrowUpRight, CalendarDays, CalendarClock, Check, CircleHelp,
@@ -11,8 +11,8 @@ import {
   type ApolloPreview, type BatchPreview, type Bucket, type Conference, type Contact, type Provider, type Snapshot,
   BUCKETS, TIME_ZONE, campaignCounts, gmailDraftsUrl, isPast, rankContacts, target,
 } from './model';
-import { api } from './api';
-import { gmailConnectRoute, startGmailConnection } from './gmail-connect';
+import { api, deskSessionEvent, getDeskSession, hostedDesk, setDeskSession } from './api';
+import { gmailConnectRoute, startGmailConnection, startOwnerSignIn } from './gmail-connect';
 import { ActionBanner, Breadcrumb, BucketBadge, ConferenceCard, dateRange, DeskArt, DialogError, Empty, eventColor, External, Mark, Modal, timeUntil } from './components';
 import { ContactForm, EventForm, RosterForm, ScheduleForm, type EventInput } from './forms';
 import { ConnectionsView, IcpView } from './settings';
@@ -266,7 +266,17 @@ function EventView({ event, snapshot, references, navigate, open, onSchedule, on
 }
 
 function App() {
-  const [snapshot, setSnapshot] = useState<Snapshot>();
+  const [snapshot, writeSnapshot] = useState<Snapshot>();
+  const snapshotRevision = useRef(0);
+  const setSnapshot = useCallback((next?: Snapshot) => {
+    snapshotRevision.current++;
+    writeSnapshot(next);
+  }, []);
+  const [sessionCode] = useState(() => hostedDesk ? new URLSearchParams(window.location.search).get('desk_code') : null);
+  const [sessionReady, setSessionReady] = useState(() => !hostedDesk || Boolean(getDeskSession()));
+  const [sessionBusy, setSessionBusy] = useState(Boolean(sessionCode));
+  const [sessionError, setSessionError] = useState(() => hostedDesk ? new URLSearchParams(window.location.search).get('desk_error') ?? '' : '');
+  const codeExchange = useRef<Promise<void> | null>(null);
   const [loadingError, setLoadingError] = useState('');
   const [route, setRoute] = useState(currentRoute);
   const [dialog, setDialog] = useState<Dialog>();
@@ -299,14 +309,54 @@ function App() {
 
   useEffect(() => {
     const location = new URL(window.location.href);
-    if (location.searchParams.has('gmail')) {
+    if (location.searchParams.has('gmail') || (hostedDesk && location.searchParams.has('desk_error'))) {
       location.searchParams.delete('gmail');
+      if (hostedDesk) location.searchParams.delete('desk_error');
       window.history.replaceState(null, '', location);
     }
-    const resetAfterBack = (event: PageTransitionEvent) => { if (event.persisted) setGmailConnecting(false); };
+    const resetAfterBack = (event: PageTransitionEvent) => {
+      if (!event.persisted) return;
+      setGmailConnecting(false);
+      setSessionBusy(false);
+    };
     window.addEventListener('pageshow', resetAfterBack);
     return () => window.removeEventListener('pageshow', resetAfterBack);
   }, []);
+  useEffect(() => {
+    if (!hostedDesk) return;
+    const updateSession = (event?: Event) => {
+      const ready = Boolean(getDeskSession());
+      setSessionReady(ready);
+      if (!ready) {
+        setSnapshot(undefined);
+        setDialog(undefined);
+        setPreview(undefined);
+        setLoadingError('');
+        if (event instanceof CustomEvent && event.detail?.expired) setSessionError('Your workspace session expired. Continue with Google to sign in again.');
+      }
+    };
+    updateSession();
+    window.addEventListener(deskSessionEvent, updateSession);
+    return () => window.removeEventListener(deskSessionEvent, updateSession);
+  }, [setSnapshot]);
+  useEffect(() => {
+    if (!sessionCode) return;
+    const location = new URL(window.location.href);
+    location.searchParams.delete('desk_code');
+    window.history.replaceState(null, '', location);
+    // React development mode can rerun effects. Exchange the single-use code once.
+    const request = codeExchange.current ??= api<{ token: string }>('/session/exchange', { code: sessionCode }, true).then(({ token }) => {
+      if (typeof token !== 'string' || !token) throw new Error('Google sign-in did not create a workspace session.');
+      setDeskSession(token);
+    });
+    let active = true;
+    void request.catch(error => {
+      if (active) setSessionError(error instanceof Error ? error.message : 'Sign-in expired. Try signing in again.');
+    }).finally(() => {
+      if (active) setSessionBusy(false);
+    });
+    return () => { active = false; };
+  }, [sessionCode]);
   useEffect(() => {
     if (window.location.hash !== '#' + gmailConnectRoute || gmailConfigured === undefined) return;
     window.history.replaceState(null, '', '#connections');
@@ -341,19 +391,49 @@ function App() {
     return () => window.removeEventListener('hashchange', updateRoute);
   }, []);
   useEffect(() => {
+    if (!sessionReady || sessionBusy) return;
     let active = true;
-    const refresh = () => api<Snapshot>('/workspace').then(data => { if (active) { setSnapshot(data); setLoadingError(''); } })
-      .catch(error => { if (active) setLoadingError(error.message); });
+    const refresh = async () => {
+      const revision = ++snapshotRevision.current;
+      try {
+        const data = await api<Snapshot>('/workspace');
+        if (!active || revision !== snapshotRevision.current) return;
+        writeSnapshot(data);
+        setLoadingError('');
+      } catch (error) {
+        if (active && revision === snapshotRevision.current) setLoadingError(error instanceof Error ? error.message : 'The workspace could not load.');
+      }
+    };
     void refresh();
     const timer = setInterval(refresh, 12_000);
     return () => { active = false; clearInterval(timer); };
-  }, []);
+  }, [sessionReady, sessionBusy]);
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(undefined), notice.kind === 'error' ? 13_000 : 6_000);
     return () => clearTimeout(timer);
   }, [notice]);
 
+  const signIn = async () => {
+    setSessionBusy(true);
+    setSessionError('');
+    try { await startOwnerSignIn(); }
+    catch (error) {
+      setSessionError(error instanceof Error ? error.message : 'Sign-in could not start. Try again.');
+      setSessionBusy(false);
+    }
+  };
+  const signOut = async () => {
+    setSessionBusy(true);
+    setSessionError('');
+    try { await api('/session/end', {}); }
+    catch {
+      setSessionError('This tab signed out. The hosted server could not confirm that the session ended.');
+    } finally {
+      setDeskSession();
+      setSessionBusy(false);
+    }
+  };
   const navigate: Navigate = view => {
     window.location.hash = view;
     setRoute(view);
@@ -437,6 +517,15 @@ function App() {
 
   const references = useMemo(() => snapshot ? outreachReferences(snapshot) : new Map(), [snapshot]);
   const event = useMemo(() => route.startsWith('event/') ? snapshot?.conferences.find(candidate => candidate.id === route.slice(6)) : undefined, [route, snapshot]);
+  if (hostedDesk && (!sessionReady || sessionBusy)) return <main className="loading-state" style={{ padding: 24, textAlign: 'center', overflowWrap: 'anywhere' }}>
+    <Mark size={37}/><h1>Conference Desk</h1>
+    <p>Sign in with the workspace owner’s Google account.</p>
+    {sessionError && <p className="dialog-error" role="alert">{sessionError}</p>}
+    <button className="button primary" onClick={() => void signIn()} disabled={sessionBusy}>
+      {sessionBusy ? <LoaderCircle className="spin" size={16}/> : <Mail size={16}/>}
+      {sessionBusy ? 'Working…' : 'Continue with Google'}
+    </button>
+  </main>;
   if (!snapshot) return <div className="loading-state"><Mark size={37}/><h1>Conference Desk</h1>{loadingError ? <p>{loadingError}</p> : <LoaderCircle className="spin" size={22}/>}</div>;
   const dialogEvent = dialog && 'eventId' in dialog ? snapshot.conferences.find(candidate => candidate.id === dialog.eventId) : undefined;
   const person = dialog?.kind === 'contact' ? dialogEvent?.contacts.find(candidate => candidate.id === dialog.personId) : undefined;
@@ -457,7 +546,7 @@ function App() {
         <div className="topbar-actions">
           {document.fullscreenEnabled && <button className="icon-button fullscreen-toggle" aria-label={fullscreen ? 'Exit full screen' : 'Enter full screen'} title={fullscreen ? 'Exit full screen' : 'Enter full screen'} aria-pressed={fullscreen} onClick={() => void toggleFullscreen()}>{fullscreen ? <Minimize2 size={17}/> : <Maximize2 size={17}/>}</button>}
           {snapshot.connections.gmail && <a className="button quiet topbar-drafts" target="_blank" rel="noreferrer" href={gmailDraftsUrl(snapshot.connections.gmail)}><Mail size={16}/> Gmail drafts <ArrowUpRight size={13}/></a>}
-          <button className="button connection-pill" disabled={gmailConnecting} onClick={() => snapshot.connections.gmail ? navigate('connections') : void connectGmail()}>
+          <button className="button connection-pill" title={snapshot.connections.gmail ? `Default sender ${snapshot.connections.gmail}` : undefined} disabled={gmailConnecting} onClick={() => snapshot.connections.gmail ? navigate('connections') : void connectGmail()}>
             <span className={`connection-dot ${snapshot.connections.gmail ? 'connected' : ''}`}/>{gmailConnecting ? 'Connecting…' : snapshot.connections.gmail ? 'Gmail connected' : 'Connect Gmail'}
           </button>
         </div>
@@ -469,7 +558,7 @@ function App() {
           notify(release ? 'Hold released. Review the draft before scheduling again.' : 'Scheduled send cancelled.');
         })}/> :
           route === 'icp' ? <IcpView snapshot={snapshot} refresh={setSnapshot} notify={notify}/> :
-          route === 'connections' ? <ConnectionsView snapshot={snapshot} refresh={setSnapshot} notify={notify} connectGmail={connectGmail} gmailConnecting={gmailConnecting}/> :
+          route === 'connections' ? <ConnectionsView snapshot={snapshot} refresh={setSnapshot} notify={notify} connectGmail={connectGmail} gmailConnecting={gmailConnecting} signOut={hostedDesk ? signOut : undefined}/> :
           event ? <EventView key={event.id} event={event} snapshot={snapshot} references={references} navigate={navigate} open={open}
             onSchedule={schedule} onAction={eventAction} busy={busy} onRefreshApollo={runId => void run(async () => {
               setSnapshot(await api<Snapshot>(`/conferences/${event.id}/enrich/apollo-runs/${runId}/check`, {}));
@@ -521,10 +610,10 @@ function App() {
         close();
         notify('Autumn received your answer.');
       })}/>}
-    {dialog?.kind === 'schedule' && <ScheduleForm event={dialogEvent} conferences={scheduleEvents} account={snapshot.connections.gmail}
+    {dialog?.kind === 'schedule' && <ScheduleForm event={dialogEvent} conferences={scheduleEvents} account={snapshot.connections.gmail} mailboxes={snapshot.connections.mailboxes}
       preview={preview} close={close} back={() => { setNotice(undefined); setPreview(undefined); }} connect={() => void connectGmail()} busy={busy || gmailConnecting}
-      load={(count, now, conferenceIds) => void run(async () => {
-        const result = await api<{ preview: BatchPreview; snapshot: Snapshot }>(schedulePath + '/preview', { count, now, conferenceIds });
+      load={(count, now, conferenceIds, email) => void run(async () => {
+        const result = await api<{ preview: BatchPreview; snapshot: Snapshot }>(schedulePath + '/preview', { count, now, conferenceIds, ...(hostedDesk && email ? { email } : {}) });
         setSnapshot(result.snapshot);
         setPreview(result.preview);
       })}

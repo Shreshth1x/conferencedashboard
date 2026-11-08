@@ -1,0 +1,7 @@
+{
+  "imports": {
+    "cheerio": "npm:cheerio@1.2.0",
+    "csv-parse/sync": "npm:csv-parse@7.0.3/sync",
+    "ipaddr.js": "npm:ipaddr.js@2.5.0"
+  }
+}

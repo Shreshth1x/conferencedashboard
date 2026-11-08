@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { ArrowRight, Cable, Check, CircleHelp, KeyRound, Mail, RefreshCw, Search, Sparkles, Target, Users } from 'lucide-react';
-import { api } from './api';
+import { api, hostedDesk } from './api';
 import { defaultGmailCallback } from './gmail-connect';
 import { BucketBadge, External } from './components';
 import { type ICP, type Snapshot, gmailDraftsUrl } from './model';
@@ -172,18 +172,34 @@ function ProviderCard({ provider, snapshot, refresh, notify }: SettingsProps & {
 type ConnectionsProps = SettingsProps & {
   connectGmail: () => Promise<void>;
   gmailConnecting: boolean;
+  signOut?: () => Promise<void>;
 };
 
 function GmailConnection({ snapshot, refresh, notify, connectGmail, gmailConnecting }: ConnectionsProps) {
   const [busy, setBusy] = useState(false);
-  const { gmail, gmailConfigured, gmailRedirectUri } = snapshot.connections;
+  const { gmail, gmailConfigured, gmailRedirectUri, mailboxes } = snapshot.connections;
   const callback = gmailRedirectUri || defaultGmailCallback();
+  const connectedMailboxes = mailboxes ?? (gmail ? [gmail] : []);
+  const multiMailbox = hostedDesk || mailboxes !== undefined;
+
+  async function selectSender(email: string) {
+    if (!email || email === gmail) return;
+    setBusy(true);
+    try {
+      refresh(await api<Snapshot>('/gmail/select', { email }));
+      notify(`Default sender set to ${email}.`);
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function disconnect() {
     setBusy(true);
     try {
-      refresh(await api<Snapshot>('/gmail/disconnect', {}));
-      notify('Gmail disconnected.');
+      refresh(await api<Snapshot>('/gmail/disconnect', multiMailbox ? { email: gmail } : {}));
+      notify(multiMailbox ? `Disconnected ${gmail}.` : 'Gmail disconnected.');
     } catch (error) {
       notify(errorMessage(error), 'error');
     } finally {
@@ -193,20 +209,29 @@ function GmailConnection({ snapshot, refresh, notify, connectGmail, gmailConnect
 
   return <article className="panel connection-panel">
     <ConnectionHeader icon={<Mail size={20}/>} tone="peach" title="Gmail"
-      detail={gmail ?? 'Send approved drafts and track replies in your mailbox.'} ready={Boolean(gmail)}
-      status={gmail ? 'Connected' : gmailConfigured ? 'Ready to connect' : 'Setup needed'}/>
+      detail={multiMailbox && gmail ? `Default sender ${gmail}` : gmail ?? 'Send approved drafts and track replies in your mailbox.'} ready={Boolean(gmail)}
+      status={connectedMailboxes.length > 1 ? `${connectedMailboxes.length} connected` : gmail ? 'Connected' : gmailConfigured ? 'Ready to connect' : 'Setup needed'}/>
+    {multiMailbox && connectedMailboxes.length > 0 && <label className="field">Default sender
+      <select aria-label="Default Gmail sender" value={gmail ?? ''} onChange={event => { void selectSender(event.target.value); }} disabled={busy || gmailConnecting}>
+        {!gmail && <option value="">Choose a mailbox</option>}
+        {connectedMailboxes.map(email => <option key={email} value={email}>{email}</option>)}
+      </select>
+    </label>}
     {(gmailConfigured || gmail) && <div className="connection-actions">
       {gmail && <a className="button secondary" href={gmailDraftsUrl(gmail)} target="_blank" rel="noreferrer">
         Open Gmail drafts <ArrowRight size={15}/>
       </a>}
       {gmailConfigured && <button type="button" className={`button ${gmail ? 'secondary' : 'primary'}`} disabled={busy || gmailConnecting}
         onClick={() => { void connectGmail(); }}>
-        {gmailConnecting ? 'Connecting…' : gmail ? 'Reconnect Gmail' : 'Connect Gmail'}
+        {gmailConnecting ? 'Connecting…' : multiMailbox && connectedMailboxes.length ? 'Connect another mailbox' : gmail ? 'Reconnect Gmail' : 'Connect Gmail'}
       </button>}
       {gmail && <button type="button" className="button secondary" disabled={busy || gmailConnecting}
-        onClick={() => { void disconnect(); }}>Disconnect</button>}
+        onClick={() => { void disconnect(); }}>{multiMailbox ? 'Disconnect selected mailbox' : 'Disconnect'}</button>}
     </div>}
-    {!gmailConfigured && <div className="connection-setup">
+    {multiMailbox && connectedMailboxes.length > 0 && <p className="field-note">New drafts and batches use the default sender. Scheduled emails keep the sender you approved.</p>}
+    {!gmailConfigured && (hostedDesk ? <div className="connection-setup">
+      <p>Configure Google OAuth on the hosted backend to connect Gmail.</p>
+    </div> : <div className="connection-setup">
       <strong><CircleHelp size={16}/> Set up Google OAuth</strong>
       <ol>
         <li>Enable the Gmail API in your Google Cloud project.</li>
@@ -215,7 +240,7 @@ function GmailConnection({ snapshot, refresh, notify, connectGmail, gmailConnect
       </ol>
       <p>For a Google OAuth app in Testing, add your mailbox as a test user. The Gmail connection expires after seven days.</p>
       <External url="https://developers.google.com/workspace/gmail/api/auth/web-server">Google’s Gmail OAuth guide</External>
-    </div>}
+    </div>)}
   </article>;
 }
 
@@ -255,10 +280,11 @@ export function ConnectionsView(props: ConnectionsProps) {
     <header className="view-head">
       <div><div className="eyebrow"><Cable size={15}/> WORKSPACE</div><h1>Connections</h1>
         <p>Connect your mailbox and the tools you use to research attendees.</p></div>
+      {props.signOut && <button className="button secondary" onClick={() => { void props.signOut?.(); }}>Sign out</button>}
     </header>
     <section className="settings-section" aria-labelledby="outreach-connections">
       <div className="section-title"><h2 id="outreach-connections">Outreach</h2></div>
-      <div className="connection-list"><GmailConnection {...props}/><CodexConnection {...props}/></div>
+      <div className="connection-list"><GmailConnection {...props}/>{!hostedDesk && <CodexConnection {...props}/>}</div>
     </section>
     <section className="settings-section" aria-labelledby="research-connections">
       <div className="section-title"><h2 id="research-connections">Research providers</h2></div>

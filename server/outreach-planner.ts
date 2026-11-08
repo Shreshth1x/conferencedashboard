@@ -1,8 +1,8 @@
-import { localDate, type Conference, type Contact, type QueueItem } from '../src/model';
-import { generateScheduleSlots, SCHEDULE_GAP_MS } from './schedule';
-import { canReachContact, isOutreachOpen, outreachContactKeys, outreachEmailKey, outreachEventCutoff as cutoff } from '../src/outreach-identity';
+import { localDate, type Conference, type Contact, type QueueItem } from '../src/model.ts';
+import { generateScheduleSlots, SCHEDULE_GAP_MS } from './schedule.ts';
+import { canReachContact, isOutreachOpen, outreachContactKeys, outreachEmailKey, outreachEventCutoff as cutoff } from '../src/outreach-identity.ts';
 
-export { canReachContact, isOutreachOpen, outreachContactKeys, outreachEmailKey } from '../src/outreach-identity';
+export { canReachContact, isOutreachOpen, outreachContactKeys, outreachEmailKey } from '../src/outreach-identity.ts';
 
 type ReachableContact = Contact & { email: string };
 type DraftOwner = { conferenceId: string; contactId: string };
