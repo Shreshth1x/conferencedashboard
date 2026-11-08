@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { createServer, type ViteDevServer } from 'vite';
 
-const basePath = '/ConferenceDashboard/';
+const basePath = '/';
 const apiBase = 'https://desk-test.example/functions/v1/desk';
 let server: ViteDevServer;
 let origin: string;
@@ -22,7 +22,7 @@ test.afterAll(async () => {
   delete process.env.VITE_BASE_PATH;
 });
 
-test('owner session and multiple Gmail senders on a GitHub Pages base path', async ({ page, context }) => {
+test('owner session and multiple Gmail senders on the hosted dashboard', async ({ page, context }) => {
   const site = origin + basePath;
   const first = 'first@example.test';
   const second = 'second@example.test';

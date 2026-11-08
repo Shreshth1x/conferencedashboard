@@ -29,11 +29,12 @@ function googleConfig() {
   if (!config || !ownerEmail()) throw new DeskError("Google sign-in needs to be configured.", 503);
   return config;
 }
+const hashOwnerGrant = (value: string) => hash(JSON.stringify([ownerEmail(), value]));
 async function sessionKey(request: Request) {
   const authorization = request.headers.get("authorization") || "";
   const session = /^Bearer ([a-f0-9]{64})$/i.exec(authorization)?.[1];
   if (!session) throw new DeskError("Sign in with your Conference Desk Google account.", 401);
-  return await hash(session);
+  return await hashOwnerGrant(session);
 }
 function requireSession(state: Pick<DeskState, "secrets">, key: string) {
   if ((hosted(state).sessions?.[key] ?? 0) <= Date.now()) throw new DeskError("Your session expired. Sign in again.", 401);
@@ -83,8 +84,8 @@ async function googleCallback(url: URL) {
           const oldest = Object.entries(sessions).sort((a, b) => a[1] - b[1])[0];
           delete sessions[oldest[0]];
         }
-        sessions[await hash(sessionToken)] = Date.now() + authLifetime;
-        exchanges[await hash(exchangeCode)] = { expiresAt: Date.now() + 120_000, sessionToken };
+        sessions[await hashOwnerGrant(sessionToken)] = Date.now() + authLifetime;
+        exchanges[await hashOwnerGrant(exchangeCode)] = { expiresAt: Date.now() + 120_000, sessionToken };
         await state.save();
       });
       destination.searchParams.set("desk_code", exchangeCode);
@@ -110,7 +111,7 @@ async function googleCallback(url: URL) {
 async function exchange(state: DeskState, input: Record<string, unknown>) {
   const code = clean(input.code);
   if (!/^[a-f0-9]{64}$/i.test(code)) throw new DeskError("The sign-in link expired. Sign in again.", 401);
-  const key = await hash(code);
+  const key = await hashOwnerGrant(code);
   const records = hosted(state).exchanges || {};
   const record = records[key];
   if (!record || record.expiresAt <= Date.now()) throw new DeskError("The sign-in link expired. Sign in again.", 401);
