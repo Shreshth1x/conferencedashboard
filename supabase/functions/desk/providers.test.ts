@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { defaultIcp } from '../../../server/default-icp.ts';
 import type { Workspace } from '../../../src/model.ts';
-import { processResearch } from './providers.ts';
+import { processResearch, runConferenceSearch } from './providers.ts';
 import type { DeskState } from './storage.ts';
 import { workspaceAction } from './workspace.ts';
 
@@ -17,6 +17,42 @@ function fixture(keys: DeskState['secrets']['keys']) {
   };
   return { state, workspace, saved: () => saved };
 }
+
+Deno.test('Hosted discovery sends public source links to the private Node crawler', async () => {
+  const { state } = fixture({ exa: 'fixture-exa' });
+  const site = 'https://desk.example.com/';
+  const url = 'https://conference.example.com/';
+  const speakers = url + 'speakers/';
+  const fetch = globalThis.fetch;
+  const env = { DESK_SITE_URL: site, DESK_RESEARCH_SECRET: 'fixture-crawler-secret' };
+  const savedEnv = Object.keys(env).map(name => [name, Deno.env.get(name)] as const);
+  for (const [name, value] of Object.entries(env)) Deno.env.set(name, value);
+  let available = true;
+  globalThis.fetch = (input, init) => {
+    const target = new URL(String(input));
+    if (target.hostname === 'api.exa.ai') {
+      return Promise.resolve(Response.json({ results: [{ url: speakers, title: 'Conference speakers' }] }));
+    }
+    assert.equal(target.href, site + 'api/conference-sources');
+    assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer fixture-crawler-secret');
+    assert.deepEqual(JSON.parse(String(init?.body)), { name: 'Conference 2027', url, seedUrls: [url, speakers] });
+    return Promise.resolve(available ? Response.json({
+      contacts: [{ name: 'Jamie Lee', attendance: 'speaker', sourceUrl: speakers }],
+      sources: [{ url: speakers, label: 'Public speakers' }], notes: [], needsRoster: true,
+    }) : new Response(null, { status: 502 }));
+  };
+  try {
+    const input = { name: 'Conference 2027', url };
+    assert.equal((await runConferenceSearch(state, input)).contacts[0]?.name, 'Jamie Lee');
+    available = false;
+    const fallback = await runConferenceSearch(state, input);
+    assert.deepEqual(fallback.sources.map(source => source.url), [url, speakers]);
+    assert.match(fallback.notes.join(' '), /crawler could not complete/);
+  } finally {
+    globalThis.fetch = fetch;
+    for (const [name, value] of savedEnv) value === undefined ? Deno.env.delete(name) : Deno.env.set(name, value);
+  }
+});
 
 Deno.test('Hosted conference discovery merges and ranks the complete available roster before starting the top ten Apollo lookups', async () => {
   const { state, workspace, saved } = fixture({ apollo: 'fixture-apollo', autumn: 'fixture-autumn', exa: 'fixture-exa' });

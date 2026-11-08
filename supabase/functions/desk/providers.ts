@@ -3,7 +3,7 @@ import { isPast, rankContacts, target } from "../../../src/model.ts";
 import {
   canEnrichWithApollo, planApolloMcpEnrichment, pollApolloWaterfall, pollAutumnDiscovery, pollAutumnEnrichment, replyAutumn,
   researchConference, startAutumnDiscovery, startAutumnEnrichment, submitApolloWaterfall, scoreContact,
-  type ResearchContact, type ResearchInput, type ResearchMcp,
+  type ResearchContact, type ResearchInput, type ResearchMcp, type ResearchResult,
 } from "../../../server/conference-research.ts";
 import type { DeskState } from "./storage.ts";
 import { active, applyResearch, hosted, mergeContacts } from "./workspace.ts";
@@ -42,9 +42,31 @@ const exaMcp: ResearchMcp = async (provider, operation, args) => {
   if (provider !== "exa" || operation !== "search") throw new DeskError("Unsupported web search operation.");
   return (await mcpRequest("https://mcp.exa.ai/mcp", "tools/call", { name: "web_search_exa", arguments: args })).value;
 };
-export function runConferenceSearch(state: Pick<DeskState, "secrets">, input: ResearchInput) {
+export async function runConferenceSearch(state: Pick<DeskState, "secrets">, input: ResearchInput) {
   const exaKey = providerKey(state, "exa");
-  return researchConference(input, { exaKey, mcp: exaKey ? undefined : exaMcp, hosted: true });
+  const links = await researchConference(input, { exaKey, mcp: exaKey ? undefined : exaMcp, hosted: true, sourceLinksOnly: true });
+  const secret = Deno.env.get("DESK_RESEARCH_SECRET");
+  const site = Deno.env.get("DESK_SITE_URL");
+  if (!secret || !site || !links.sources.length) return links;
+  try {
+    const endpoint = new URL("/api/conference-sources", site);
+    if (endpoint.protocol !== "https:") throw new Error("Invalid crawler endpoint.");
+    const { name, url, notes } = input;
+    const response = await fetch(endpoint, {
+      method: "POST", redirect: "error", signal: AbortSignal.timeout(30_000),
+      headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+      body: JSON.stringify({ name, url, notes, seedUrls: links.sources.map(source => source.url) }),
+    });
+    if (!response.ok) throw new Error("Crawler request failed.");
+    const result = await response.json() as ResearchResult;
+    if (!Array.isArray(result.contacts) || !Array.isArray(result.sources) || !Array.isArray(result.notes) || typeof result.needsRoster !== "boolean") {
+      throw new Error("Invalid crawler result.");
+    }
+    return result;
+  } catch {
+    links.notes.push("Public source links are available. The page crawler could not complete this pass.");
+    return links;
+  }
 }
 
 const apolloUrl = "https://mcp.apollo.io/mcp";

@@ -697,7 +697,7 @@ function differentEdition(path: string, targetYear: string | undefined) {
   return Boolean(targetYear && years.length && !years.includes(targetYear));
 }
 
-export async function researchConference(input: ResearchInput, options: { exaKey?: string; mcp?: ResearchMcp; sourceLinksOnly?: boolean; hosted?: boolean } = {}): Promise<ResearchResult> {
+export async function researchConference(input: ResearchInput, options: { exaKey?: string; mcp?: ResearchMcp; sourceLinksOnly?: boolean; hosted?: boolean; seedUrls?: string[] } = {}): Promise<ResearchResult> {
   const rawName = clean(input.name, 500);
   const inputUrl = clean(input.url, 2048) ?? rawName?.match(/https?:\/\/[^\s<>"']+/i)?.[0];
   const bareDomain = !inputUrl && rawName && /^(?:www\.)?[a-z0-9.-]+\.[a-z]{2,}(?:\/\S*)?$/i.test(rawName) ? rawName : undefined;
@@ -711,26 +711,34 @@ export async function researchConference(input: ResearchInput, options: { exaKey
   }
   if (inputUrl && !startUrl) result.notes.push("Use a public HTTP or HTTPS conference URL.");
   const exaKey = options.exaKey ?? process.env.EXA_API_KEY;
-  const queue = startUrl ? [startUrl] : [];
+  const candidates = startUrl ? [startUrl] : [];
   const deadline = options.hosted ? AbortSignal.timeout(HOSTED_CRAWL_TIMEOUT_MS) : undefined;
   const maxPages = options.hosted ? HOSTED_MAX_PAGES : MAX_PAGES;
   let searchFailed = false;
-  if ((options.mcp || exaKey) && (name || startUrl)) {
+  if (options.seedUrls) {
+    for (const seed of options.seedUrls) {
+      const url = publicUrl(seed);
+      if (url && !differentEdition(url.pathname, requestedYear)) candidates.push(url);
+    }
+  } else if ((options.mcp || exaKey) && (name || startUrl)) {
     try {
       const search = searchConference(name, startUrl, clean(input.notes, 180), exaKey, options.mcp);
-      queue.push(...await (deadline ? untilAborted(search, deadline) : search));
+      candidates.push(...await (deadline ? untilAborted(search, deadline) : search));
     } catch (error) {
       searchFailed = true;
       result.notes.push(error instanceof Error ? error.message : "Web search was unavailable.");
     }
   }
-  if (!queue.length && !result.contacts.length) {
+  if (!candidates.length && !result.contacts.length) {
     result.notes.push(searchFailed ? "Add the official event URL or import a roster to continue."
-      : options.mcp || exaKey ? "Search returned no matching event pages. Add the event link or import a roster."
+      : options.seedUrls || options.mcp || exaKey ? "Search returned no matching event pages. Add the event link or import a roster."
       : "Add the official event URL, import a roster, or connect Exa for name-based search.");
   }
-  const sourceLinks = [...new Set(queue.map(url => url.href))].slice(0, maxPages)
-    .map(url => ({ url, label: url === startUrl?.href ? "Provided conference page" : "Public conference search" }));
+  const unique = new Map<string, URL>();
+  for (const url of candidates) if (!unique.has(url.href)) unique.set(url.href, url);
+  const queue = [...unique.values()];
+  const sourceLinks = queue.slice(0, maxPages)
+    .map(({ href }) => ({ url: href, label: href === startUrl?.href ? "Provided conference page" : "Public conference search" }));
   if (options.sourceLinksOnly) {
     result.sources = sourceLinks;
     if (result.needsRoster) result.notes.push("Import a roster or use Autumn to find attendees from public sources.");

@@ -178,6 +178,24 @@ test("hosted conference discovery crawls public sources and preserves attendance
   ]);
   assert.ok(result.sources.some(item => item.url === unavailable));
   assert.ok(!result.sources.some(item => item.url === blocked));
+
+  let repeatedSearch = 0;
+  const seeded = await researchConference({ name: "Sample Commissioning Summit 2026", url: source }, {
+    hosted: true,
+    seedUrls: [
+      ...Array.from({ length: 8 }, () => source + "#duplicate"),
+      `https://${hostname}/2025/speakers`,
+      "http://169.254.169.254/latest/meta-data",
+      blocked,
+      `${source}/sponsors.csv`,
+      unavailable,
+    ],
+    mcp: async () => { repeatedSearch++; return { results: [] }; },
+  });
+  assert.equal(repeatedSearch, 0);
+  assert.equal(get.mock.callCount(), 8);
+  assert.deepEqual(seeded.contacts, result.contacts);
+  assert.deepEqual(seeded.sources, result.sources);
 });
 
 test("Apollo MCP checks capability once, requires exact approval, and reports credits for verified matches", async () => {
