@@ -152,3 +152,62 @@ test('owner session and multiple Gmail senders on a GitHub Pages base path', asy
   await expect(page.getByRole('alert')).toContainText('session expired');
   expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
 });
+
+test('adding a hosted conference shows background discovery and keeps Apollo behind the ranked roster', async ({ page, context }) => {
+  const headers = {
+    'access-control-allow-origin': origin,
+    'access-control-allow-methods': 'GET,POST,OPTIONS',
+    'access-control-allow-headers': 'authorization,content-type',
+  };
+  const conference = { id: 'new-event', title: 'Example Conference', createdAt: new Date().toISOString(),
+    contacts: [{ id: 'contact', name: 'Jamie Lee', title: 'Commissioning lead', bucket: 'direct', score: 90, reason: 'Role match', attendance: 'attendee' }],
+    sources: [], notes: [], needsRoster: true };
+  let added = false;
+  let searched = false;
+  let apolloQueued = false;
+  const snapshot = () => ({
+    conferences: added ? [conference] : [], queue: [], outreachReady: 0,
+    icp: { name: 'Example', description: '', direct: [], connector: [], accounts: [] },
+    connections: { gmailConfigured: true, apollo: true, autumn: true, exa: true, codex: false },
+    jobs: added ? [{ id: 'job', conferenceId: conference.id, kind: 'discovery', automatic: true,
+      status: searched ? 'done' : 'running', message: searched ? 'Attendee research complete.' : 'Searching public sources.' }] : [],
+  });
+
+  await context.route(apiBase + '/**', route => {
+    const request = route.request();
+    if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers });
+    const path = request.url().slice(apiBase.length);
+    const respond = (json: object, status = 200) => route.fulfill({ status, headers, json });
+    if (path === '/session/exchange') return respond({ token: 'mock-session' });
+    if (path === '/workspace') return respond(snapshot());
+    if (path === '/conferences') {
+      expect(request.postDataJSON().input).toBe(conference.title);
+      added = true;
+      return respond({ conferenceId: conference.id, snapshot: snapshot() });
+    }
+    if (path === '/conferences/new-event/enrich') {
+      expect(request.postDataJSON()).toEqual({ provider: 'apollo', limit: 10 });
+      apolloQueued = true;
+      return respond({ ...snapshot(), enrichmentNotes: ['Apollo email lookups queued.'] });
+    }
+    return respond({ error: 'Unmatched mock endpoint' }, 404);
+  });
+
+  await page.goto(origin + basePath + '?desk_code=one-time');
+  await page.getByRole('button', { name: 'Add conference', exact: true }).first().click();
+  await page.getByLabel('Conference link or details').fill(conference.title);
+  await page.getByRole('button', { name: 'Add and find attendees' }).click();
+  await expect(page.getByText('Finding and ranking attendees', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'View research' }).click();
+  const apollo = page.getByRole('button', { name: 'Find work emails with Apollo' });
+  await expect(apollo).toBeDisabled();
+
+  searched = true;
+  await page.reload();
+  await page.getByRole('button', { name: 'Research & sources' }).click();
+  await expect(apollo).toBeEnabled();
+  await apollo.click();
+  await expect(page.getByText('Apollo email lookups queued.', { exact: true })).toBeVisible();
+  expect(apolloQueued).toBe(true);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});

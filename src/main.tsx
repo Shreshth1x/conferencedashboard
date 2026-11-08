@@ -191,6 +191,8 @@ function EventView({ event, snapshot, references, navigate, open, onSchedule, on
   const pageSize = 30;
   const shown = scoped.slice((page - 1) * pageSize, page * pageSize);
   const jobs = snapshot.jobs.filter(job => job.conferenceId === event.id);
+  const discovery = jobs.find(job => job.kind === 'discovery' && (job.status === 'running' || job.status === 'needs_input'));
+  const automaticDiscovery = discovery?.automatic ? discovery : undefined;
   return <>
     <Breadcrumb label={event.shortTitle || event.title} back={() => navigate('conferences')}/>
     <header className="view-head event-head"><div className="title-block">
@@ -207,7 +209,12 @@ function EventView({ event, snapshot, references, navigate, open, onSchedule, on
       <div className="overview-stat"><Clock3 size={16}/><span>Left to send</span><strong>{stats.left}</strong>{stats.scheduled > 0 && <small>{stats.scheduled} queued</small>}</div>
       <div className="overview-progress"><div><span>Outreach progress</span><strong>{stats.progress}%</strong></div><div className="progress"><span style={{ width: `${stats.progress}%` }}/></div></div>
     </div>
-    {event.needsRoster && !past && <ActionBanner title="The public roster may be incomplete" detail="Add the organizer’s roster or attendee export for fuller coverage." action="Import attendees" onAction={() => open({ kind: 'roster', eventId: event.id })}/>}
+    {automaticDiscovery ? <ActionBanner
+      title={automaticDiscovery.status === 'needs_input' ? 'Attendee research needs your input' : 'Finding and ranking attendees'}
+      detail={automaticDiscovery.message || 'Research runs in the background. The roster updates as results come in.'}
+      action={automaticDiscovery.status === 'needs_input' ? 'Answer Autumn' : 'View research'}
+      onAction={() => automaticDiscovery.status === 'needs_input' ? open({ kind: 'autumn-reply', eventId: event.id, jobId: automaticDiscovery.id }) : setTab('research')}/>
+      : event.needsRoster && !past && <ActionBanner title="The public roster may be incomplete" detail="Add the organizer’s roster or attendee export for fuller coverage." action="Import attendees" onAction={() => open({ kind: 'roster', eventId: event.id })}/>}
     <div className="event-tabs" aria-label="Conference sections">
       <button aria-pressed={tab === 'attendees'} onClick={() => setTab('attendees')}><Users size={17}/> Attendees <span>{contacts.length}</span></button>
       <button aria-pressed={tab === 'research'} onClick={() => setTab('research')}><Globe2 size={17}/> Research & sources {jobs.some(job => job.status === 'running') && <LoaderCircle className="spin" size={14}/>}</button>
@@ -247,13 +254,13 @@ function EventView({ event, snapshot, references, navigate, open, onSchedule, on
         <h2>Research & enrichment</h2><p>Find public speakers and attendees, then enrich direct fits and likely introducers.</p>
         <div className="research-actions">
           <button className="button secondary" disabled={busy} onClick={() => onAction(event, 'public')}><ScanSearch size={17}/> Search event pages</button>
-          <button className="button secondary" disabled={busy || jobs.some(job => job.kind === 'discovery' && (job.status === 'running' || job.status === 'needs_input'))} onClick={() => onAction(event, 'autumn-discovery')}><Globe2 size={17}/> Expand with Autumn</button>
-          {!past && <><button className="button secondary" disabled={busy || !contacts.length} onClick={() => onAction(event, 'apollo')}><Users size={17}/> Review Apollo enrichment</button>
+          <button className="button secondary" disabled={busy || Boolean(discovery)} onClick={() => onAction(event, 'autumn-discovery')}><Globe2 size={17}/> Expand with Autumn</button>
+          {!past && <><button className="button secondary" disabled={busy || !contacts.length || (hostedDesk && Boolean(discovery))} onClick={() => onAction(event, 'apollo')}><Users size={17}/> {hostedDesk ? 'Find work emails with Apollo' : 'Review Apollo enrichment'}</button>
           <button className="button secondary" disabled={busy || !contacts.length || jobs.some(job => job.kind === 'enrichment' && (job.status === 'running' || job.status === 'needs_input'))} onClick={() => onAction(event, 'autumn')}><Sparkles size={17}/> Enrich next 10 with Autumn</button></>}
         </div>
         {jobs.length > 0 && <div className="job-list">{jobs.slice().reverse().map(job => <div key={job.id}>
           {job.status === 'running' ? <LoaderCircle className="spin" size={14}/> : job.status === 'failed' ? <X size={16}/> : job.status === 'needs_input' ? <CircleHelp size={16}/> : <Check size={16}/>}
-          <span><strong>{job.kind === 'discovery' ? 'Autumn roster research' : 'Autumn contact enrichment'}</strong>
+          <span><strong>{job.automatic ? 'Automatic attendee research' : job.kind === 'discovery' ? 'Autumn roster research' : 'Autumn contact enrichment'}</strong>
             <small>{job.message || (job.status === 'running' ? 'Running in the background' : job.status)}</small>
             {job.status === 'needs_input' && <button className="button secondary" onClick={() => open({ kind: 'autumn-reply', eventId: event.id, jobId: job.id })}>Answer Autumn</button>}
           </span>
@@ -494,8 +501,14 @@ function App() {
         setSnapshot(await api<Snapshot>(base + '/research', {}));
         notify('Public research updated.');
       } else if (action === 'apollo') {
-        const preview = await api<ApolloPreview>(base + '/enrich/apollo-preview', {});
-        open({ kind: 'apollo', eventId: event.id, preview });
+        if (hostedDesk) {
+          const result = await api<Snapshot & { enrichmentNotes?: string[] }>(base + '/enrich', { provider: 'apollo', limit: 10 });
+          setSnapshot(result);
+          notify(result.enrichmentNotes?.join(' ') || 'Apollo email lookups queued.');
+        } else {
+          const preview = await api<ApolloPreview>(base + '/enrich/apollo-preview', {});
+          open({ kind: 'apollo', eventId: event.id, preview });
+        }
       } else {
         setSnapshot(await api<Snapshot>(base + '/enrich', { provider: action, limit: 10 }));
         notify('Autumn enrichment started.');
@@ -511,7 +524,7 @@ function App() {
       const result = await api<{ conferenceId: string; snapshot: Snapshot }>('/conferences', input);
       setSnapshot(result.snapshot);
       navigate('event/' + result.conferenceId);
-      notify('Conference added.');
+      notify(hostedDesk ? 'Conference added. Attendee research is queued.' : 'Conference added.');
     }
   });
 

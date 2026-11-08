@@ -1,8 +1,10 @@
+import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import { lookup as resolveHost } from "node:dns/promises";
 import { get as getHttp } from "node:http";
 import { get as getHttps } from "node:https";
 import { isIP } from "node:net";
+import process from "node:process";
 import { load, type CheerioAPI } from "cheerio";
 import { parse as parseCsv } from "csv-parse/sync";
 import ipaddr from "ipaddr.js";
@@ -204,7 +206,7 @@ const CSV_HEADERS: Record<string, string> = {
   session: "sessionTitle", "session title": "sessionTitle",
 };
 
-export function parseAttendeeList(input: string): ResearchContact[] {
+export function parseAttendeeList(input: string, defaultAttendance: Attendance = "attendee"): ResearchContact[] {
   if (!input.trim()) return [];
   const firstLine = input.trim().split(/\r?\n/, 1)[0];
   let rows: string[][];
@@ -228,7 +230,7 @@ export function parseAttendeeList(input: string): ResearchContact[] {
     contacts.push({
       name, title: clean(fields.title), company: clean(fields.company), email, emailStatus: email ? "unverified" : undefined,
       emailSource: email ? "Provided roster" : undefined, linkedin: linkedinUrl(fields.linkedin),
-      attendance: attendanceValue(fields.attendance) ?? (clean(fields.attendance) ? "unconfirmed" : "attendee"),
+      attendance: attendanceValue(fields.attendance) ?? (clean(fields.attendance) ? "unconfirmed" : defaultAttendance),
       sourceUrl, sourceLabel: "Provided roster", hook: hookSource ? clean(fields.hook, 500) : undefined, hookSource,
       sessionTitle: clean(fields.sessionTitle, 200),
     });
@@ -239,12 +241,33 @@ export function parseAttendeeList(input: string): ResearchContact[] {
 const MAX_PAGE_BYTES = 2_000_000;
 const MAX_PAGES = 12;
 const PAGE_TIMEOUT_MS = 7_000;
+const HOSTED_CRAWL_TIMEOUT_MS = 20_000;
+const HOSTED_PAGE_TIMEOUT_MS = 4_000;
+const HOSTED_MAX_PAGES = 6;
+const HOSTED_MAX_PAGE_BYTES = 1_000_000;
 const EVENT_LINK = /\b(?:speakers?|presenters?|panelists?|moderators?|agenda|program(?:me)?|schedule|attendees?|delegates?|roster|event guide|event guidebook|attendee directory)\b/i;
 
-async function fetchPublic(url: URL, redirects = 0, signal = AbortSignal.timeout(PAGE_TIMEOUT_MS)): Promise<{ url: URL; html: string; csv: boolean }> {
+class UnsafeResearchHost extends Error {}
+
+async function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  let abort: () => void = () => {};
+  const canceled = new Promise<never>((_resolve, reject) => {
+    abort = () => reject(signal.reason);
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, canceled]);
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+}
+
+async function fetchPublic(url: URL, redirects = 0, signal = AbortSignal.timeout(PAGE_TIMEOUT_MS), maxBytes = MAX_PAGE_BYTES): Promise<{ url: URL; html: string; csv: boolean }> {
+  signal.throwIfAborted();
   const host = url.hostname.replace(/^\[|\]$/g, "");
-  const records = isIP(host) ? [{ address: host, family: isIP(host) }] : await resolveHost(host, { all: true });
-  if (!records.length || records.some(({ address }) => !publicAddress(address))) throw new Error("Private or reserved network addresses are blocked.");
+  const records = isIP(host) ? [{ address: host, family: isIP(host) }] : await untilAborted(resolveHost(host, { all: true }), signal);
+  if (!records.length || records.some(({ address }) => !publicAddress(address))) throw new UnsafeResearchHost("Private or reserved network addresses are blocked.");
   const record = records.find(({ family }) => family === 4) ?? records[0];
   const get = url.protocol === "https:" ? getHttps : getHttp;
   const result = await new Promise<{ html: string; csv?: boolean; location?: string }>((resolve, reject) => {
@@ -275,7 +298,7 @@ async function fetchPublic(url: URL, redirects = 0, signal = AbortSignal.timeout
       let bytes = 0;
       response.on("data", (chunk: Buffer) => {
         bytes += chunk.length;
-        if (bytes > MAX_PAGE_BYTES) {
+        if (bytes > maxBytes) {
           response.destroy(new Error("Page exceeds the research size limit."));
           return;
         }
@@ -288,8 +311,8 @@ async function fetchPublic(url: URL, redirects = 0, signal = AbortSignal.timeout
   });
   if (!result.location) return { url, html: result.html, csv: Boolean(result.csv) };
   const next = publicUrl(result.location, url.href);
-  if (!next || redirects >= 3) throw new Error("Redirect could not be followed safely.");
-  return fetchPublic(next, redirects + 1, signal);
+  if (!next || redirects >= 3) throw new UnsafeResearchHost("Redirect could not be followed safely.");
+  return fetchPublic(next, redirects + 1, signal, maxBytes);
 }
 
 type Structured = Record<string, unknown>;
@@ -674,7 +697,7 @@ function differentEdition(path: string, targetYear: string | undefined) {
   return Boolean(targetYear && years.length && !years.includes(targetYear));
 }
 
-export async function researchConference(input: ResearchInput, options: { exaKey?: string; mcp?: ResearchMcp; sourceLinksOnly?: boolean } = {}): Promise<ResearchResult> {
+export async function researchConference(input: ResearchInput, options: { exaKey?: string; mcp?: ResearchMcp; sourceLinksOnly?: boolean; hosted?: boolean } = {}): Promise<ResearchResult> {
   const rawName = clean(input.name, 500);
   const inputUrl = clean(input.url, 2048) ?? rawName?.match(/https?:\/\/[^\s<>"']+/i)?.[0];
   const bareDomain = !inputUrl && rawName && /^(?:www\.)?[a-z0-9.-]+\.[a-z]{2,}(?:\/\S*)?$/i.test(rawName) ? rawName : undefined;
@@ -689,10 +712,13 @@ export async function researchConference(input: ResearchInput, options: { exaKey
   if (inputUrl && !startUrl) result.notes.push("Use a public HTTP or HTTPS conference URL.");
   const exaKey = options.exaKey ?? process.env.EXA_API_KEY;
   const queue = startUrl ? [startUrl] : [];
+  const deadline = options.hosted ? AbortSignal.timeout(HOSTED_CRAWL_TIMEOUT_MS) : undefined;
+  const maxPages = options.hosted ? HOSTED_MAX_PAGES : MAX_PAGES;
   let searchFailed = false;
   if ((options.mcp || exaKey) && (name || startUrl)) {
     try {
-      queue.push(...await searchConference(name, startUrl, clean(input.notes, 180), exaKey, options.mcp));
+      const search = searchConference(name, startUrl, clean(input.notes, 180), exaKey, options.mcp);
+      queue.push(...await (deadline ? untilAborted(search, deadline) : search));
     } catch (error) {
       searchFailed = true;
       result.notes.push(error instanceof Error ? error.message : "Web search was unavailable.");
@@ -703,15 +729,17 @@ export async function researchConference(input: ResearchInput, options: { exaKey
       : options.mcp || exaKey ? "Search returned no matching event pages. Add the event link or import a roster."
       : "Add the official event URL, import a roster, or connect Exa for name-based search.");
   }
+  const sourceLinks = [...new Set(queue.map(url => url.href))].slice(0, maxPages)
+    .map(url => ({ url, label: url === startUrl?.href ? "Provided conference page" : "Public conference search" }));
   if (options.sourceLinksOnly) {
-    result.sources = [...new Set(queue.map(url => url.href))].slice(0, MAX_PAGES)
-      .map(url => ({ url, label: url === startUrl?.href ? "Provided conference page" : "Public conference search" }));
+    result.sources = sourceLinks;
     if (result.needsRoster) result.notes.push("Import a roster or use Autumn to find attendees from public sources.");
     return result;
   }
   const scanned = new Set<string>();
-  for (let offset = 0; queue.length && offset < MAX_PAGES;) {
-    const batch = queue.splice(0, Math.min(3, MAX_PAGES - offset)).filter((url) => {
+  const unsafe = new Set<string>();
+  for (let offset = 0; queue.length && offset < maxPages && !deadline?.aborted;) {
+    const batch = queue.splice(0, Math.min(3, maxPages - offset)).filter((url) => {
       if (scanned.has(url.href) || (url !== startUrl && differentEdition(url.pathname, requestedYear ?? result.startDate?.slice(0, 4)))) return false;
       scanned.add(url.href);
       return true;
@@ -719,8 +747,11 @@ export async function researchConference(input: ResearchInput, options: { exaKey
     offset += batch.length;
     const pages = await Promise.all(batch.map(async (url) => {
       try {
-        return await fetchPublic(url);
+        if (!deadline) return await fetchPublic(url);
+        const pageSignal = AbortSignal.any([deadline, AbortSignal.timeout(HOSTED_PAGE_TIMEOUT_MS)]);
+        return await fetchPublic(url, 0, pageSignal, HOSTED_MAX_PAGE_BYTES);
       } catch (error) {
+        if (error instanceof UnsafeResearchHost) unsafe.add(url.href);
         if (url.href === startUrl?.href) result.notes.push(error instanceof Error ? error.message : "The event page could not be fetched.");
         return undefined;
       }
@@ -730,7 +761,9 @@ export async function researchConference(input: ResearchInput, options: { exaKey
       if (page.csv || /\.csv$/i.test(page.url.pathname)) {
         try {
           const label = "Public roster";
-          const contacts = parseAttendeeList(page.html).map((contact) => ({ ...contact, sourceUrl: page.url.href, sourceLabel: label,
+          const attendance = options.hosted && !/\b(?:attendees?|delegates?|roster)\b/i.test(page.url.pathname.replace(/_/g, " "))
+            ? "unconfirmed" : "attendee";
+          const contacts = parseAttendeeList(page.html, attendance).map((contact) => ({ ...contact, sourceUrl: page.url.href, sourceLabel: label,
             emailSource: contact.email ? page.url.href : undefined }));
           if (contacts.length) {
             result.sources.push({ url: page.url.href, label });
@@ -743,6 +776,7 @@ export async function researchConference(input: ResearchInput, options: { exaKey
         continue;
       }
       const { metadata, label, contacts, rosterFound, links } = extractPage(page.url, page.html);
+      if (options.hosted && differentEdition(metadata.startDate ?? metadata.title ?? "", requestedYear)) continue;
       if (!result.sources.some((source) => source.url === page.url.href)) result.sources.push({ url: page.url.href, label });
       result.title ||= metadata.title;
       result.startDate ||= metadata.startDate;
@@ -751,8 +785,11 @@ export async function researchConference(input: ResearchInput, options: { exaKey
       result.url ||= page.url.href;
       result.contacts.push(...contacts);
       result.needsRoster &&= !rosterFound;
-      queue.push(...links.slice(0, MAX_PAGES));
+      queue.push(...links.slice(0, maxPages));
     }
+  }
+  if (options.hosted) {
+    result.sources.push(...sourceLinks.filter(source => !unsafe.has(source.url) && !result.sources.some(known => known.url === source.url)));
   }
   result.contacts = dedupeContacts(result.contacts);
   if (result.needsRoster) result.notes.push(result.contacts.length

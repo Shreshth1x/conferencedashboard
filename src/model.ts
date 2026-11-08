@@ -109,6 +109,9 @@ export interface ResearchJob {
   kind: 'discovery' | 'enrichment';
   status: 'running' | 'needs_input' | 'done' | 'failed';
   transport?: 'mcp' | 'api';
+  automatic?: boolean;
+  stage?: 'public' | 'autumn_start' | 'autumn_starting';
+  lastPolledAt?: number;
   message?: string;
   contactIds?: string[];
 }
@@ -170,6 +173,7 @@ export type ApolloWaterfallRun = {
   id: string;
   conferenceId: string;
   approvedAt: string;
+  automatic?: boolean;
   costLabel: string;
   recipients: ApolloWaterfallRecipient[];
 };

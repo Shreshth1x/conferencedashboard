@@ -90,7 +90,7 @@ export function ApolloWaterfallResults({ runs, onRefresh, busy }: {
       const inProgress = pending + run.recipients.filter(recipient => recipient.status === 'queued' || recipient.status === 'submitting').length;
       return <details className="apollo-run" key={run.id} open={index === 0 || undefined}>
         <summary>
-          <span>Approved {slotTime(run.approvedAt)}</span>
+          <span>{run.automatic ? 'Queued automatically' : 'Queued'} {slotTime(run.approvedAt)}</span>
           <span className="apollo-run-counts">
             <span>{run.recipients.length} {run.recipients.length === 1 ? 'contact' : 'contacts'}</span>
             {matched > 0 && <span className="apollo-result-status matched">{matched} matched</span>}

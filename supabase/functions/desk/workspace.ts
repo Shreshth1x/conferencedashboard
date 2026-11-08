@@ -1,4 +1,4 @@
-import type { BatchPreview, Conference, Contact, ICP, Provider, QueueItem, Snapshot, Workspace } from "../../../src/model.ts";
+import type { BatchPreview, Conference, Contact, ICP, McpConnection, Provider, QueueItem, Snapshot, Workspace } from "../../../src/model.ts";
 import { isPast, localDate, rankContacts, safeLink, target } from "../../../src/model.ts";
 import { canReachContact, isOutreachOpen, outreachContactKeys, outreachDraftOwners, outreachReservations, planOutreach } from "../../../server/outreach-planner.ts";
 import { SCHEDULE_GAP_MS } from "../../../server/schedule.ts";
@@ -8,7 +8,7 @@ import type { GmailAuthorization } from "../../../server/gmail.ts";
 import type { DeskState } from "./storage.ts";
 import { deskGmailConfig, exportDeskGmailDrafts, getDeskMailbox, hasConflictingDeskDraft, syncDeskMailbox } from "./mail.ts";
 import { clean, DeskError, expire, token } from "./shared.ts";
-import { apolloAction, discovery, enrichment, providerKey, refreshApollo, runConferenceSearch } from "./providers.ts";
+import { apolloAction, checkHostedMcp, discovery, enrichment, providerKey, queueConferenceDiscovery, refreshApollo } from "./providers.ts";
 
 type Input = Record<string, unknown>;
 export type HostedState = {
@@ -17,6 +17,7 @@ export type HostedState = {
   sessions?: Record<string, number>;
   batchPreviews?: Record<string, { preview: BatchPreview; expiresAt: number; fingerprint: string }>;
   apolloPreviews?: Record<string, { conferenceId: string; contactIds: string[]; fingerprints: string[]; expiresAt: number }>;
+  providerChecks?: Partial<Record<Provider, McpConnection>>;
 };
 export const hosted = (state: Pick<DeskState, "secrets">) => (state.secrets.hosted ??= {}) as HostedState;
 export const active = (item: QueueItem) => item.status === "scheduled" || item.status === "sending";
@@ -59,6 +60,12 @@ export function mergeContacts(workspace: Workspace, event: Conference, incoming:
       existing.email = person.email;
       existing.emailStatus = person.emailStatus;
       existing.emailSource = person.emailSource;
+    } else if (existing.email && person.email && normalized(existing.email) === normalized(person.email) &&
+        (!existing.emailStatus || existing.emailStatus === "unverified") && person.emailSource &&
+        (person.emailStatus === "sourced" || person.emailStatus === "verified") && !existing.sentAt && !existing.previouslyContacted &&
+        !workspace.queue.some(item => item.conferenceId === event.id && item.contactId === existing.id && active(item))) {
+      existing.emailStatus = person.emailStatus;
+      existing.emailSource = person.emailSource;
     }
     if (existing.attendance === "unconfirmed") existing.attendance = person.attendance;
     Object.assign(existing, scoreContact(existing, workspace.icp));
@@ -87,7 +94,7 @@ export function snapshot(state: Pick<DeskState, "workspace" | "secrets">): Snaps
     connections: { gmailConfigured: Boolean(gmailConfig), gmailRedirectUri: gmailConfig?.redirectUri,
       gmail, mailboxes, apollo: Boolean(providerKey(state, "apollo")), autumn: Boolean(providerKey(state, "autumn")),
       exa: Boolean(providerKey(state, "exa")), codex: false,
-      mcp: { exa: { status: "connected", detail: "Public web search" }, apollo: { status: "unavailable" }, autumn: { status: "unavailable" } } },
+      mcp: { exa: { status: "connected", detail: "Public web search" }, ...hosted(state).providerChecks } },
   };
 }
 
@@ -199,7 +206,13 @@ export async function workspaceAction(state: DeskState, path: string[], input: I
     const keys = secrets.keys ??= {};
     if (key) keys[id as Provider] = key;
     else delete keys[id as Provider];
+    const checks = hosted(state).providerChecks;
+    if (checks) delete checks[id as Provider];
   } else if (group === "connections" && id === "mcp" && action === "check") {
+    const provider = input.provider;
+    if (provider !== "apollo" && provider !== "autumn" && provider !== "exa") throw new DeskError("Choose a research provider.");
+    (hosted(state).providerChecks ??= {})[provider] = await checkHostedMcp(state, provider);
+    await state.save();
     return { snapshot: snapshot(state) };
   } else if (group === "connections" && id === "codex") {
     return { connected: false, snapshot: snapshot(state) };
@@ -214,17 +227,21 @@ export async function workspaceAction(state: DeskState, path: string[], input: I
     const title = clean(input.title);
     const provided = clean(input.input, 12_000);
     const url = safeLink(clean(input.url, 2048) || provided.match(/https?:\/\/[^\s<>"']+/i)?.[0]);
+    const link = url ? new URL(url) : undefined;
     const startDate = clean(input.startDate, 10);
     const endDate = clean(input.endDate, 10);
-    if (!title && !provided && !url) throw new DeskError("Enter a conference link, name, or event details.");
+    const query = provided.replace(/https?:\/\/[^\s<>"']+/gi, "").trim();
+    const eventTitle = title || query.slice(0, 160) || link?.hostname;
+    if (!eventTitle || link?.username || link?.password) throw new DeskError("Enter a public conference link, name, or event details.");
     if (!validDate(startDate) || !validDate(endDate) || (startDate && endDate && endDate < startDate)) throw new DeskError("Enter a valid conference date range.");
-    const query = title || provided.replace(/https?:\/\/[^\s<>"']+/gi, "").trim();
-    const result = await runConferenceSearch(state, { name: title || query, url, attendees: clean(input.attendees, 2_000_000) });
-    const event: Conference = { id: crypto.randomUUID(), title: title || result.title || query.slice(0, 160) || new URL(url!).hostname,
+    const roster = parseAttendeeList(clean(input.attendees, 2_000_000));
+    const event: Conference = { id: crypto.randomUUID(), title: eventTitle,
       location: clean(input.location) || undefined, startDate: startDate || undefined, endDate: endDate || undefined,
-      url, contacts: [], sources: [], notes: [], needsRoster: true, createdAt: new Date().toISOString() };
-    applyResearch(workspace, event, result);
+      url, contacts: [], sources: [], notes: [],
+      needsRoster: !roster.some(person => person.attendance === "attendee"), createdAt: new Date().toISOString() };
+    mergeContacts(workspace, event, roster);
     workspace.conferences.push(event);
+    queueConferenceDiscovery(state, event);
     await state.save();
     return { conferenceId: event.id, snapshot: snapshot(state) };
   } else if (group === "conferences" && id) {
@@ -297,7 +314,7 @@ export async function workspaceAction(state: DeskState, path: string[], input: I
           refreshApollo(state, event, extra);
         } else if (input.provider === "apollo") {
           await apolloAction(state, event, input, false);
-          return { ...snapshot(state), enrichmentNotes: ["Approved. Supabase will run the waterfall lookup."] };
+          return { ...snapshot(state), enrichmentNotes: ["Apollo waterfall queued for the next ranked contacts."] };
         } else if (input.provider === "autumn") {
           await enrichment(state, event, input);
         } else throw new DeskError("Choose an enrichment provider.");

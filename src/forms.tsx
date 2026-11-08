@@ -24,7 +24,10 @@ function FilePick({ onText }: { onText: (value: string) => void }) {
 export function EventForm({ event, close, save, busy }: { event?: Conference; close: () => void; save: (data: EventInput) => void; busy: boolean }) {
   const [input, setInput] = useState<EventInput>({ input: '', title: event?.title ?? '', location: event?.location ?? '', url: event?.url ?? '', startDate: event?.startDate ?? '', endDate: event?.endDate ?? '', attendees: '' });
   const bind = (field: keyof EventInput) => ({ value: input[field], onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setInput({ ...input, [field]: e.target.value }) });
-  return <Modal title={event ? 'Edit conference' : 'Add a conference'} description={event ? 'Update your dates, location, or event link.' : 'Start with whatever you have. A name, link, or event details are enough.'} onClose={close}>
+  const description = event ? 'Update your dates, location, or event link.'
+    : hostedDesk ? 'Enter an event name or link to start attendee research. Conference Desk ranks the roster before looking up work emails.'
+    : 'Start with whatever you have. A name, link, or event details are enough.';
+  return <Modal title={event ? 'Edit conference' : 'Add a conference'} description={description} onClose={close}>
     <form onSubmit={e => { e.preventDefault(); save(input); }}>
       {!event && <label className="field">Conference link or details<textarea rows={3} autoFocus required placeholder="https://event.com or Advancing Data Center Construction East…" {...bind('input')}/></label>}
       {event ? <label className="field">Conference name<input required autoFocus {...bind('title')}/></label> : null}
@@ -36,7 +39,7 @@ export function EventForm({ event, close, save, busy }: { event?: Conference; cl
         <div className="field-row"><label className="field">Start date<input type="date" {...bind('startDate')}/></label><label className="field">End date<input type="date" {...bind('endDate')}/></label></div>
         {!event && <><label className="field">Attendees<textarea rows={4} placeholder="Paste a list of names or CSV rows" {...bind('attendees')}/></label><FilePick onText={attendees => setInput({ ...input, attendees })}/></>}
       </details>
-      <div className="form-actions"><button className="button secondary" type="button" onClick={close}>Cancel</button><button className="button primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17}/> : <ArrowRight size={17}/>} {event ? 'Save details' : busy ? 'Researching…' : 'Find attendees'}</button></div>
+      <div className="form-actions"><button className="button secondary" type="button" onClick={close}>Cancel</button><button className="button primary" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17}/> : <ArrowRight size={17}/>} {event ? 'Save details' : hostedDesk ? 'Add and find attendees' : busy ? 'Researching…' : 'Find attendees'}</button></div>
     </form>
   </Modal>;
 }

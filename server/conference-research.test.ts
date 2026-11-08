@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import dns from "node:dns/promises";
+import { EventEmitter } from "node:events";
+import type { IncomingMessage } from "node:http";
+import https, { type RequestOptions } from "node:https";
+import { syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 import {
   checkApolloMcpEnrichment, enrichApollo, parseAttendeeList, planApolloMcpEnrichment, pollApolloWaterfall,
@@ -110,6 +115,69 @@ test("Exa MCP accepts labeled text and applies the same URL and edition filters"
   assert.equal(rest.mock.callCount(), 0);
   assert.deepEqual(result.sources, []);
   assert.match(result.notes[0], /no matching event pages/i);
+});
+
+test("hosted conference discovery crawls public sources and preserves attendance evidence", async (t) => {
+  const hostname = "summit.example.com";
+  const source = `https://${hostname}/2026`;
+  const blocked = "https://private.example.com/speakers";
+  const unavailable = `${source}/agenda`;
+  const fixtures: Record<string, string> = {
+    "/2026": `<title>Sample Commissioning Summit 2026</title><h1>Sample Commissioning Summit 2026</h1>
+      <a href="/2026/speakers">Speakers</a><a href="/2025/attendees">Prior attendees</a>
+      <a href="/2026/sponsors.csv">Sponsors</a>`,
+    "/2026/speakers": `<title>Speakers</title><script type="application/ld+json">
+      {"@type":"Event","startDate":"2026-11-17","speaker":{"@type":"Person","name":"Ana Casey",
+       "jobTitle":"Commissioning Director","worksFor":{"name":"Sample Engineering"}}}
+      </script>`,
+    "/2026/sponsors.csv": "Name,Title,Company\nJamie Lee,Director,Example Company",
+    "/2026/agenda": "",
+  };
+  const lookup = t.mock.method(dns, "lookup", async (host: string) => {
+    return [{ address: host === hostname ? "93.184.216.34" : "10.0.0.10", family: 4 }];
+  });
+  const get = t.mock.method(https, "get", (url: URL, options: RequestOptions, callback: (response: IncomingMessage) => void) => {
+    assert.equal(url.hostname, hostname);
+    assert.ok(Object.hasOwn(fixtures, url.pathname));
+    options.lookup?.(hostname, {}, (error, address) => {
+      assert.equal(error, null);
+      assert.equal(address, "93.184.216.34");
+    });
+    const response = Object.assign(new EventEmitter(), {
+      statusCode: url.href === unavailable ? 403 : 200,
+      headers: { "content-type": url.pathname.endsWith(".csv") ? "text/csv" : "text/html" },
+      resume() {},
+    }) as IncomingMessage;
+    queueMicrotask(() => {
+      callback(response);
+      response.emit("data", Buffer.from(fixtures[url.pathname]));
+      response.emit("end");
+    });
+    return new EventEmitter();
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    lookup.mock.restore();
+    get.mock.restore();
+    syncBuiltinESMExports();
+  });
+
+  const result = await researchConference({ name: "Sample Commissioning Summit 2026", url: source }, {
+    hosted: true,
+    mcp: async () => ({ results: [
+      { title: "Sample Commissioning Summit 2026", url: blocked },
+      { title: "Sample Commissioning Summit 2026 sponsors", url: `${source}/sponsors.csv` },
+      { title: "Sample Commissioning Summit 2026 agenda", url: unavailable },
+    ] }),
+  });
+  assert.equal(get.mock.callCount(), 4);
+  assert.equal(result.needsRoster, true);
+  assert.deepEqual(result.contacts.map(({ name, attendance, sourceUrl }) => ({ name, attendance, sourceUrl })).sort((a, b) => a.name.localeCompare(b.name)), [
+    { name: "Ana Casey", attendance: "speaker", sourceUrl: `${source}/speakers` },
+    { name: "Jamie Lee", attendance: "unconfirmed", sourceUrl: `${source}/sponsors.csv` },
+  ]);
+  assert.ok(result.sources.some(item => item.url === unavailable));
+  assert.ok(!result.sources.some(item => item.url === blocked));
 });
 
 test("Apollo MCP checks capability once, requires exact approval, and reports credits for verified matches", async () => {

@@ -148,6 +148,10 @@ function ProviderCard({ provider, snapshot, refresh, notify }: SettingsProps & {
     {approvalLink && canAuthorize && <p role="status"><External url={approvalLink}>Open {provider.label} approval</External> and approve access, then return here and click Check MCP connection.</p>}
     <details className="connection-setup">
       <summary>API key fallback{keyConfigured ? ' · configured' : ''}</summary>
+      {hostedDesk && provider.id === 'apollo' && <p>
+        The hosted dashboard uses a private Apollo master key for MCP. Once connected, new conferences can look up work emails for the highest-ranked eligible contacts. <External url="https://developer.apollo.io/#/keys">Manage Apollo keys</External>
+      </p>}
+      {hostedDesk && provider.id === 'autumn' && <p>An Autumn API key lets Conference Desk search for attendees through MCP in the background.</p>}
       <div className="connection-actions">
         <button type="button" className="button secondary" aria-controls={editing ? formId : undefined} aria-expanded={editing}
           disabled={Boolean(busy)} onClick={() => { setEditing(!editing); setSecret(''); }}>
